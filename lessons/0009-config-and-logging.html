@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0009 · 配置管理（.env）与结构化日志（pino）</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属可视化：日志对比、环境表、密钥泄露示意 */
+.logdemo{display:grid;gap:.75rem;margin:1rem 0}
+.logline{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.82rem;padding:.6rem .8rem;border-radius:8px;line-height:1.55;overflow-x:auto;white-space:pre}
+.logline.plain{background:#1e1e2e;color:#cdd6f4;border-left:4px solid #6c7086}
+.logline.json{background:#11261c;color:#a6e3a1;border-left:4px solid #40c463}
+.logline .k{color:#89b4fa}
+.logline .lv{color:#f9e2af}
+.envtable{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.86rem}
+.envtable th,.envtable td{border:1px solid #d0d7de;padding:.5rem .65rem;text-align:left;vertical-align:top}
+.envtable th{background:#f3f5f8}
+.envtable code{font-size:.82rem}
+.leak{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;background:#fff5f5;border:1px solid #ffc9c9;border-radius:10px;padding:.7rem .9rem;margin:1rem 0;font-size:.88rem}
+.leak .badge{background:#e03131;color:#fff;border-radius:6px;padding:.1rem .5rem;font-size:.72rem;font-weight:700;white-space:nowrap}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:.45rem;margin:1rem 0;font-size:.82rem}
+.flow .box{background:#eef2ff;border:1px solid #c3cdfb;border-radius:8px;padding:.45rem .65rem;font-family:ui-monospace,monospace}
+.flow .arr{color:#8893a8;font-weight:700}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0009 / 阶段 2</span></nav>
+<div class="kicker">Lesson 0009 · Node.js 后端之路</div>
+<h1>配置管理（.env）与结构化日志（pino）</h1>
+
+<div class="mission">
+<b>为什么学这个？</b> 到目前为止，LinkPulse 的端口 <code>3000</code> 是写死在代码里的，日志全靠 <code>console.log</code> 随手打。这在玩具阶段没问题，但<strong>要上线收费</strong>就不行了：上线后端口/域名/数据库密码会变、不同环境（你本机 vs 服务器）配置不同、出故障时你得能在成千上万条日志里<strong>按字段检索</strong>而不是肉眼翻字符串。本章把两件「业余 → 专业」的事一次做对：① 把配置从代码里抽出来放进 <code>.env</code>（并保证密钥<strong>永不进 git</strong>）；② 用 <code>pino</code> 输出<strong>结构化 JSON 日志</strong>，替换掉之前写的 <code>console.log</code> 日志中间件。这两件事是任何能上线的后端服务的「成年礼」。
+</div>
+
+<h2><span class="n">1</span>为什么不能把配置写死在代码里</h2>
+
+<p>先看我们现在 LinkPulse 里的写法（来自 Lesson 0005/0008）：</p>
+
+<pre><code>// 现状：端口写死在代码里
+const PORT = 3000;
+app.listen(PORT, () =&gt; console.log(`listening on ${PORT}`));</code></pre>
+
+<p>这个 <code>3000</code> 叫<b>硬编码（hard-coded）配置</b>——把「会随环境变化的值」直接钉死在源码里。它有三个致命问题：</p>
+
+<ul>
+<li><b>① 同一份代码跑不了多个环境。</b> 你本机想用 <code>3000</code>，但云服务器可能要求用 <code>8080</code>，或者由平台动态分配。写死意味着每个环境都要改源码、重新发布。</li>
+<li><b>② 改配置 = 改代码 = 重新部署。</b> 想把对外域名从 <code>localhost</code> 换成 <code>https://lnkp.io</code>？本该是「改一行配置重启」，结果变成「改代码、提交、走 CI、重新构建」。配置和代码<strong>本是两种东西，变化频率完全不同</strong>。</li>
+<li><b>③ 最危险——密钥会被写进代码，然后进 git。</b> 数据库密码、Stripe 支付密钥、JWT 签名密钥……一旦写进源码并 <code>git push</code>，就<strong>永久留在 git 历史里</strong>（即使后来删掉，历史里还在）。仓库一旦泄露或开源，密钥就泄露了。</li>
+</ul>
+
+<div class="rw">🌍 <b>实战：12-Factor App 第三条「Config」。</b> 业界公认的云原生应用方法论 <a href="https://12factor.net/config" target="_blank" rel="noopener">The Twelve-Factor App</a> 明确规定：<b>「在环境中存储配置（Store config in the environment）」</b>。原文要点<sup><a href="#c4">4</a></sup>：配置是「<i>likely to vary between deploys</i>（在不同部署间会变的东西）」——数据库连接、外部服务凭据、每次部署的域名等；把它们写成代码里的常量是「<i>a violation of twelve-factor</i>」。它给了一个极其好用的<b>试金石（litmus test）</b>：「<i>能不能在任意时刻把代码库开源，而不泄露任何凭据？</i>」如果不能，说明你的配置还没和代码分干净。LinkPulse 将来要放 GitHub、要让别人 code review，这条必须从第一天就遵守。</div>
+
+<div class="note"><b>区分两个词。</b>「<b>配置（config）</b>」= 随环境变化的值（端口、域名、密钥）；「<b>常量（constant）</b>」= 永远不变的业务值（比如「免费版最多 50 个短链」这种产品规则）。常量可以留在代码里；配置必须抽出去。判断标准就一句：<i>本机和生产服务器上，这个值会不会不一样？</i> 会，就是配置。</div>
+
+<h2><span class="n">2</span>环境变量与 <code>process.env</code></h2>
+
+<p>那配置放哪？答案是<b>环境变量（environment variable）</b>。</p>
+
+<div class="note"><b>定义 + 类比。</b> 环境变量是<strong>操作系统层面</strong>的键值对，由「启动进程的环境」提供给程序，而不是写在程序里。<br><b>类比：</b>你（程序）去酒店入住，房间号（端口）、Wi-Fi 密码（密钥）不是你出生就带着的，而是<strong>前台（操作系统/部署平台）在你入住时塞给你的一张卡</strong>。同一个你，在不同酒店拿到不同的卡——这正是「一份代码、多个环境」的关键：代码不变，环境把配置「喂」进来。</div>
+
+<p>在 Node.js 里，所有环境变量都挂在全局对象 <code>process.env</code> 上。<code>process</code> 是 Node 的全局对象（不用 import 就能用），代表「当前这个 Node 进程」。官方定义：<code>process.env</code>「<i>returns an object containing the user environment</i>（返回一个包含用户环境的对象）」<sup><a href="#c2">2</a></sup>。</p>
+
+<pre><code>// 读取环境变量（注意：在 ESM 里 process 仍是全局可用的）
+console.log(process.env.HOME);     // 你的家目录，比如 /Users/you
+console.log(process.env.PORT);     // 我们待会儿要自己设的</code></pre>
+
+<p>先在终端临时设一个变量跑跑看，建立直观感受：</p>
+
+<div class="cmp">
+<div><h4>macOS / Linux（zsh/bash）</h4>
+<pre><code># 在命令前面临时设置，仅对这条命令生效
+PORT=4000 node -e "console.log(process.env.PORT)"
+# 输出：4000</code></pre></div>
+<div><h4>Windows（PowerShell）</h4>
+<pre><code>$env:PORT=4000; node -e "console.log(process.env.PORT)"
+# 输出：4000</code></pre></div>
+</div>
+
+<div class="note"><b>⚠️ 后端新手最容易踩的坑：环境变量永远是字符串。</b> 官方明确：「<i>Assigning a property on <code>process.env</code> will implicitly convert the value to a string</i>（赋值会被隐式转成字符串）」<sup><a href="#c2">2</a></sup>。所以 <code>process.env.PORT</code> 读出来是字符串 <code>"4000"</code>，<strong>不是数字 4000</strong>。如果你拿它去和数字比较、或某些 API 要求传 number，就会出诡异 bug。养成习惯：读数字配置就 <code>Number(...)</code>，读布尔就 <code>=== 'true'</code>。</div>
+
+<pre><code>const port = Number(process.env.PORT);          // 字符串 → 数字
+const isProd = process.env.NODE_ENV === 'production'; // 字符串 → 布尔</code></pre>
+
+<p>你可能注意到上面出现了 <code>NODE_ENV</code>。它是一个<strong>约定俗成</strong>（不是 Node 强制，但整个生态都认）的环境变量，用来标记当前运行环境。它正是下一节的主角。</p>
+
+<h2><span class="n">3</span>不同环境：development vs production</h2>
+
+<p>同一份 LinkPulse 代码，会跑在至少两种环境里，配置和行为都该不同：</p>
+
+<table class="envtable">
+<thead><tr><th>维度</th><th><code>development</code>（你本机开发）</th><th><code>production</code>（线上给用户用）</th></tr></thead>
+<tbody>
+<tr><td>PORT</td><td>3000</td><td>由平台决定，如 8080</td></tr>
+<tr><td>BASE_URL（生成的短链前缀）</td><td><code>http://localhost:3000</code></td><td><code>https://lnkp.io</code></td></tr>
+<tr><td>日志格式</td><td>人类可读、带颜色（方便你看）</td><td>纯 JSON（方便机器检索）</td></tr>
+<tr><td>日志级别</td><td>debug（啥都打，方便排查）</td><td>info（少打点，省存储/降噪）</td></tr>
+<tr><td>报错信息</td><td>返回完整堆栈（你要调试）</td><td>只返回「服务器错误」（不能泄露内部细节给攻击者）</td></tr>
+</tbody>
+</table>
+
+<p>所以后端代码里经常出现「根据环境分叉」的写法，靠的就是读 <code>NODE_ENV</code>：</p>
+
+<pre><code>const isProd = process.env.NODE_ENV === 'production';
+// 例：开发环境用漂亮日志，生产环境用纯 JSON（第 6 节会真正用到）</code></pre>
+
+<div class="rw">🌍 <b>实战：<code>NODE_ENV=production</code> 不只是「标记」，它会真的让你的程序变快。</b> 很多库（包括我们在用的 <a href="https://expressjs.com/en/advanced/best-practice-performance.html" target="_blank" rel="noopener">Express</a><sup><a href="#c5">5</a></sup>）会检测这个变量：设为 <code>production</code> 时，Express 会缓存视图模板、减少冗长错误输出，官方文档称这能带来<strong>数倍性能提升</strong>。所以线上<strong>务必</strong>设 <code>NODE_ENV=production</code>——忘了设是新手最常见的「线上比本地慢」原因之一。</div>
+
+<h2><span class="n">4</span>把配置放进 <code>.env</code> 文件并加载它</h2>
+
+<p>临时在命令前敲 <code>PORT=4000</code> 太累，配置一多就管不过来。业界标准做法是把它们集中写进一个名为 <code>.env</code> 的文本文件。在 LinkPulse 根目录新建：</p>
+
+<pre><code># .env  —— LinkPulse 本地开发配置
+PORT=3000
+BASE_URL=http://localhost:3000
+NODE_ENV=development</code></pre>
+
+<p>格式规则（来自 Node 官方文档，dotenv 也基本一致）<sup><a href="#c1">1</a></sup>：</p>
+<ul>
+<li>一行一个 <code>KEY=VALUE</code>。</li>
+<li><code>#</code> 之后是注释：<code>PORT=3000 # 本地端口</code> 也合法。</li>
+<li>值可以用 <code>"</code>、<code>'</code> 或反引号包起来，引号会被去掉：<code>NAME="LinkPulse"</code> 得到 <code>LinkPulse</code>。</li>
+<li>支持多行值；<code>export KEY=...</code> 里的 <code>export</code> 会被忽略（方便从 shell 脚本复制粘贴）。</li>
+</ul>
+
+<h3 style="margin-top:1.4rem">加载方式 A（推荐）：Node 20+ 内置 <code>--env-file</code></h3>
+
+<p>从 <b>Node v20.6.0</b> 起，Node 内置了加载 <code>.env</code> 的能力，<strong>不需要装任何包</strong>。在启动命令加一个 <code>--env-file</code> 标志即可<sup><a href="#c1">1</a></sup>：</p>
+
+<pre><code>node --env-file=.env 01-node-core/express-server.js</code></pre>
+
+<p>官方对它的描述：「<i>Loads environment variables from a file relative to the current directory, making them available to applications on <code>process.env</code></i>」<sup><a href="#c1">1</a></sup>。加载流程是这样的：</p>
+
+<div class="flow">
+<span class="box">.env 文件</span><span class="arr">──①读取──▶</span>
+<span class="box">--env-file 解析</span><span class="arr">──②注入──▶</span>
+<span class="box">process.env</span><span class="arr">──③读取──▶</span>
+<span class="box">你的代码</span>
+</div>
+
+<div class="note"><b>好消息：从 Node 24.10 / 22.21 起，<code>--env-file</code> 不再是「实验性（experimental）」特性</b><sup><a href="#c1">1</a></sup>，可以放心在生产用。如果你用的是更早的版本，运行时会看到一行 experimental 警告，功能仍可用。<b>查版本：</b><code>node -v</code>，本课程要求 Node 20+。</div>
+
+<p>把它写进 <code>package.json</code> 的 <code>scripts</code>，以后一个 <code>npm run dev</code> 就行（注意我们项目是 ESM，配合 <code>--watch</code> 自动重启）：</p>
+
+<pre><code>// package.json（节选）—— 让 dev 启动时自动读 .env
+{
+  "scripts": {
+    "dev":   "node --watch --env-file=.env 01-node-core/express-server.js",
+    "start": "node --env-file=.env 01-node-core/express-server.js"
+  }
+}</code></pre>
+
+<div class="note"><b>两个好用的兄弟标志。</b>① <code>--env-file-if-exists=.env</code>（v22.9.0+）：文件<strong>不存在也不报错</strong>，适合「本地有 .env、生产靠平台注入环境变量」的场景<sup><a href="#c1">1</a></sup>。② 可以传多个：<code>node --env-file=.env --env-file=.env.local ...</code>，<strong>后面的文件覆盖前面的</strong>同名变量<sup><a href="#c1">1</a></sup>，方便用 <code>.env.local</code> 覆盖个人配置。</div>
+
+<h3 style="margin-top:1.4rem">加载方式 B（了解）：<code>dotenv</code> 第三方包</h3>
+
+<p>在 Node 20 内置这功能之前，全世界都用 <a href="https://www.npmjs.com/package/dotenv" target="_blank" rel="noopener">dotenv</a> 这个包（至今仍是 npm 上下载量最大的包之一）。你会在无数老项目和教程里见到它，所以要认得：</p>
+
+<div class="cmp">
+<div><h4>dotenv：代码里加载</h4>
+<pre><code>// 装包：npm install dotenv
+import 'dotenv/config'; // 放在最顶上，越早越好
+
+console.log(process.env.PORT);</code></pre></div>
+<div><h4>内置：命令行加载（推荐）</h4>
+<pre><code>// 不用装包，不用改代码
+// 只在启动命令加标志：
+// node --env-file=.env app.js
+
+console.log(process.env.PORT);</code></pre></div>
+</div>
+
+<p><b>怎么选？</b>新项目（如我们的 LinkPulse）优先用<strong>内置 <code>--env-file</code></strong>：零依赖、更干净。dotenv 的优势在于「在代码里加载」（某些工具链不方便改启动命令时有用）和一些高级特性（如变量插值、加密的 dotenvx）。本课程统一用内置方案。</p>
+
+<h3 style="margin-top:1.4rem">⚠️ 最重要的一步：<code>.env</code> 必须进 <code>.gitignore</code></h3>
+
+<div class="leak"><span class="badge">真实事故</span> 把含密钥的 <code>.env</code> 提交进 git → push 到 GitHub → 爬虫几分钟内扫到密钥 → 有人用你的 AWS/Stripe 密钥刷出天价账单。这类事故每天都在发生。</div>
+
+<p>dotenv 官方对「该不该提交 .env」的回答只有一个字：<b>「No.（不该）」</b>，并要求把它加进 <code>.gitignore</code><sup><a href="#c3">3</a></sup>。在 LinkPulse 根目录创建/编辑 <code>.gitignore</code>：</p>
+
+<pre><code># .gitignore
+node_modules/
+.env
+.env.local
+.env.*.local</code></pre>
+
+<div class="rw">🌍 <b>实战：用 <code>.env.example</code> 当「配置说明书」。</b> <code>.env</code> 本身不进 git，但队友拉下代码后不知道要配哪些变量怎么办？通行做法是<strong>提交一个 <code>.env.example</code>（只有键、没有真值）进 git</strong>：<br><code>PORT=</code> / <code>BASE_URL=</code> / <code>NODE_ENV=</code>。<br>新人 <code>cp .env.example .env</code> 再填上自己的值即可。这样「需要哪些配置」是公开文档，「配置的真实值」是私密的——LinkPulse 的仓库就该这么组织。<b>记住 12-factor 那条试金石：仓库随时能开源而不泄露任何凭据。</b></div>
+
+<div class="note"><b>如果不小心已经提交了怎么办？</b> 光删文件不够——它还在 git 历史里。dotenv 文档建议：「<i>Remove it, remove git history</i>（删文件，再清理 git 历史）」<sup><a href="#c3">3</a></sup>，并且<strong>立刻把泄露的密钥作废、重新生成</strong>。已经暴露过的密钥，必须当成永久失效处理。</div>
+
+<h2><span class="n">5</span>为什么 <code>console.log</code> 不够：结构化日志</h2>
+
+<p>我们之前在 LinkPulse 里写过类似这样的日志中间件（Lesson 0006）：</p>
+
+<pre><code>app.use((req, res, next) =&gt; {
+  console.log(`${req.method} ${req.url}`);   // GET /api/links
+  next();
+});</code></pre>
+
+<p>本机看着挺好，但它<strong>扛不住生产环境</strong>。问题在于 <code>console.log</code> 打出来的是<b>非结构化文本（unstructured text）</b>——对人友好，对机器极不友好。</p>
+
+<div class="logdemo">
+<div class="logline plain">GET /api/links 201 in 13ms   ← console.log 打出来的：一行字符串，没有结构</div>
+<div class="logline json">{<span class="k">"level"</span>:<span class="lv">30</span>,<span class="k">"time"</span>:1718000000000,<span class="k">"msg"</span>:<span class="lv">"request completed"</span>,<span class="k">"method"</span>:<span class="lv">"GET"</span>,<span class="k">"url"</span>:<span class="lv">"/api/links"</span>,<span class="k">"status"</span>:<span class="lv">201</span>,<span class="k">"ms"</span>:13}   ← 结构化 JSON 日志：每个字段可被检索</div>
+</div>
+
+<p><b>结构化日志（structured logging）的定义：</b>把每条日志写成<strong>机器可解析的格式（通常是 JSON）</strong>，每个信息点都是一个有名字的字段（<code>method</code>、<code>status</code>、<code>ms</code>……），而不是糊成一行文字。为什么这事在生产环境是刚需？</p>
+
+<ul>
+<li><b>① 能按字段检索/过滤/聚合。</b> 线上一天几百万条日志，你想查「所有 <code>status&gt;=500</code> 的请求」或「<code>ms&gt;1000</code> 的慢请求」。JSON 日志可以直接 <code>WHERE status &gt;= 500</code>；纯文本只能用正则瞎抓，又慢又容易抓错。</li>
+<li><b>② 能携带上下文。</b> 可以给每条日志附带 <code>userId</code>、<code>requestId</code> 等字段。出故障时，按 <code>requestId</code> 就能把<strong>同一次请求的所有日志串起来</strong>看，而不是在海量日志里大海捞针。</li>
+<li><b>③ 机器读得懂 = 能自动化。</b> 监控系统能基于「error 级别日志数」自动告警、画图、统计。文本日志做不到这些。</li>
+</ul>
+
+<div class="rw">🌍 <b>实战：生产日志会被送进集中式日志平台。</b> 真实的 SaaS 不会让你 SSH 上服务器 <code>tail -f</code> 看日志（服务器可能有几十台）。日志会通过采集器汇总到 <strong>ELK（Elasticsearch + Logstash + Kibana）、Grafana Loki、Datadog</strong> 这类平台，在网页上搜索、画图、告警。这些平台<strong>天然吃 JSON</strong>：你打的每个字段都会自动变成可搜索、可聚合的维度。LinkPulse 上线后排查「为什么某个用户的短链跳转失败」，靠的就是按 <code>linkId</code> 检索结构化日志。从今天起就打 JSON，等于为将来铺好了路。</div>
+
+<h2><span class="n">6</span><code>pino</code> 入门：给 LinkPulse 装上专业日志</h2>
+
+<p>结构化日志当然可以自己 <code>JSON.stringify</code> 手搓，但有现成的高质量库就别造轮子。我们选 <b>pino</b>。</p>
+
+<div class="note"><b>pino 是什么？</b> 一个专注于「快」的 Node.js JSON 日志库，官网一句话定位：「<i>Super fast, all natural JSON logger for Node.js</i>」<sup><a href="#c6">6</a></sup>。它默认就输出 JSON，几乎零配置就能用。</div>
+
+<div class="rw">🌍 <b>实战：为什么选 pino 而不是 winston？</b> Node 生态最有名的两个日志库是 <a href="https://getpino.io/" target="_blank" rel="noopener">pino</a> 和 winston。winston 历史更久、功能/可配置项更多；<b>pino 的杀手锏是「快」和「低开销」</b>——它的设计哲学是<strong>「Logging should never slow down an application（打日志绝不该拖慢应用）」</strong><sup><a href="#c6">6</a></sup>。它做法很聪明：尽量少在主线程里干活，重活（格式化、写文件）尽量挪到别处。对一个要扛流量、对延迟敏感的 SaaS 来说，「快」往往比「花哨配置」更重要，所以 pino 是近几年新项目的主流选择之一。</div>
+
+<h3 style="margin-top:1.2rem">第一步：安装并创建 logger</h3>
+
+<pre><code>npm install pino</code></pre>
+
+<p>新建一个文件集中创建 logger（这样全项目共用同一个实例）。<b>注意：我们项目是 ESM（<code>package.json</code> 里 <code>"type":"module"</code>），所以用 <code>import</code>。</b></p>
+
+<pre><code>// 01-node-core/logger.js
+import pino from 'pino';
+
+// pino() 接受可选的 options，返回一个 logger 实例
+const logger = pino();
+
+export default logger;</code></pre>
+
+<p>用起来就这么简单——调用级别方法，传一句话：</p>
+
+<pre><code>import logger from './logger.js';
+
+logger.info('hello world');</code></pre>
+
+<p>它打印到标准输出的是<strong>一行 JSON</strong>（官方示例输出）<sup><a href="#c6">6</a></sup>：</p>
+
+<div class="logline json">{<span class="k">"level"</span>:<span class="lv">30</span>,<span class="k">"time"</span>:1531257112193,<span class="k">"msg"</span>:<span class="lv">"hello world"</span>,<span class="k">"pid"</span>:55956,<span class="k">"hostname"</span>:<span class="lv">"x"</span>}</div>
+
+<p>注意几个 pino 自动加上的字段：<code>time</code>（时间戳）、<code>pid</code>（进程号）、<code>hostname</code>（主机名）——这些在多进程/多机器排查时极有用，<code>console.log</code> 可没有。</p>
+
+<h3 style="margin-top:1.2rem">第二步：理解日志级别（log levels）</h3>
+
+<p>那个 <code>"level":30</code> 是什么？pino 把日志按<strong>严重程度</strong>分级，每级有方法名和一个数字值<sup><a href="#c7">7</a></sup>：</p>
+
+<table class="envtable">
+<thead><tr><th>方法</th><th>数值</th><th>什么时候用</th></tr></thead>
+<tbody>
+<tr><td><code>logger.trace()</code></td><td>10</td><td>最啰嗦的调试细节</td></tr>
+<tr><td><code>logger.debug()</code></td><td>20</td><td>开发期排查用</td></tr>
+<tr><td><code>logger.info()</code></td><td>30</td><td>正常运转信息（默认最低级别）</td></tr>
+<tr><td><code>logger.warn()</code></td><td>40</td><td>不致命但要留意</td></tr>
+<tr><td><code>logger.error()</code></td><td>50</td><td>出错了（比如请求失败）</td></tr>
+<tr><td><code>logger.fatal()</code></td><td>60</td><td>致命，程序可能要退出</td></tr>
+</tbody>
+</table>
+
+<p>级别的意义在于<b>过滤</b>：你设一个最低级别，低于它的日志不输出。pino 默认最低级别是 <code>info</code>（30），所以默认 <code>trace</code>/<code>debug</code> 不会打。这正好对应第 3 节的环境差异——开发环境调成 <code>debug</code>（啥都看），生产调成 <code>info</code>（降噪）：</p>
+
+<pre><code>// 01-node-core/logger.js —— 升级版：级别随环境变化
+import pino from 'pino';
+
+const logger = pino({
+  // 生产 info，开发 debug；还能用环境变量 LOG_LEVEL 覆盖
+  level: process.env.LOG_LEVEL
+    ?? (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
+});
+
+export default logger;</code></pre>
+
+<h3 style="margin-top:1.2rem">第三步：记录错误 & 携带上下文字段</h3>
+
+<p>每个级别方法都接受「<b>先一个对象，再一句话</b>」的形式：<code>logger.info([mergingObject], [message])</code>。对象里的每个键都会被<strong>合并进这条 JSON 日志</strong>，成为可检索字段<sup><a href="#c7">7</a></sup>。这就是「携带上下文」的实现方式：</p>
+
+<pre><code>// 记一次短链创建，带上业务字段
+logger.info({ shortCode: 'aZ3x9', url: 'https://example.com' }, 'short link created');
+// → {"level":30,...,"shortCode":"aZ3x9","url":"https://...","msg":"short link created"}
+
+// 记错误：把 error 对象传进去，pino 会自动展开成 type/message/stack
+try {
+  // ... 某个会抛错的操作
+} catch (err) {
+  logger.error({ err }, 'failed to create short link');
+}</code></pre>
+
+<h3 style="margin-top:1.2rem">第四步：用 pino 替换 LinkPulse 的日志中间件</h3>
+
+<p>现在把 Lesson 0006 那个 <code>console.log</code> 中间件换成 pino。注意<strong>响应结束后</strong>才知道状态码和耗时，所以我们监听 <code>res</code> 的 <code>finish</code> 事件来记一条完整的请求日志：</p>
+
+<pre><code>// 01-node-core/express-server.js（节选：日志中间件）
+import express from 'express';
+import logger from './logger.js';
+
+const app = express();
+app.use(express.json());
+
+// ✅ 用 pino 记录每个请求（替换掉旧的 console.log 中间件）
+app.use((req, res, next) =&gt; {
+  const start = Date.now();
+  res.on('finish', () =&gt; {
+    logger.info(
+      {
+        method: req.method,
+        url: req.originalUrl,
+        status: res.statusCode,
+        ms: Date.now() - start,
+      },
+      'request completed'
+    );
+  });
+  next();
+});
+
+// 启动时也用 logger，并从 .env 读 PORT / BASE_URL
+const PORT = Number(process.env.PORT) || 3000;
+const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
+
+app.listen(PORT, () =&gt; {
+  logger.info({ port: PORT, baseUrl: BASE_URL }, 'LinkPulse server started');
+});</code></pre>
+
+<div class="note"><b>进阶（知道有这回事就行）：</b> 生产中通常不自己手写请求中间件，而是用 pino 官方配套的 <a href="https://github.com/pinojs/pino-http" target="_blank" rel="noopener">pino-http</a> 中间件——它自动记请求/响应、自动给每个请求生成 <code>requestId</code>，省心。本课先用「手写 + finish 事件」把原理讲透；等 LinkPulse 进入正式阶段我们会换成 pino-http。</div>
+
+<h3 style="margin-top:1.2rem">第五步：开发时把 JSON 变好看（pino-pretty）</h3>
+
+<p>纯 JSON 适合机器，但你本地开发时盯着一行行 JSON 很累。pino 官方提供 <b>pino-pretty</b>，开发环境把日志格式化成带颜色、人类可读的样子<sup><a href="#c6">6</a></sup>。它是个<strong>独立工具</strong>，用管道接在后面即可——<strong>不污染生产</strong>（生产仍输出纯 JSON）：</p>
+
+<pre><code>npm install -D pino-pretty
+
+# 本地开发：把 pino 的 JSON 通过管道喂给 pino-pretty 美化
+node --env-file=.env 01-node-core/express-server.js | npx pino-pretty</code></pre>
+
+<div class="logdemo">
+<div class="logline plain">[12:00:00.000] INFO: LinkPulse server started
+    port: 3000
+    baseUrl: "http://localhost:3000"   ← pino-pretty 美化后，本地看着舒服</div>
+</div>
+
+<div class="rw">🌍 <b>实战：生产环境绝不要在 Node 进程里跑 pino-pretty。</b> 官方建议把美化放在「<strong>进程之外</strong>」用管道做（就像上面），因为格式化很耗 CPU——让它在你的应用进程里跑，等于把 pino「快」的优势抵消掉。生产就让 pino 直吐 JSON，由日志采集器接走。<b>规律：开发图好看（pretty），生产图快和可检索（raw JSON）。</b></div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">配置 &amp; 日志</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">你在 LinkPulse 里写 <code>const isProd = process.env.NODE_ENV === 'production';</code>。下面哪个说法是<b>对</b>的？</p>
+  <button class="opt" data-correct="true" data-ex="对！process.env 的值永远是字符串（官方：赋值会被隐式转成字符串）。所以必须和字符串 'production' 比较，数字配置则要先 Number(...) 转换。">用 <code>=== 'production'</code> 比较是对的，因为环境变量的值永远是<strong>字符串</strong></button>
+  <button class="opt" data-correct="false" data-ex="错。NODE_ENV 是整个生态约定俗成的变量，但不是 Node 自动设的——你需要通过 .env 或部署平台显式设置它，否则它是 undefined。">Node 会自动把 <code>NODE_ENV</code> 设成 <code>production</code>，不用自己管</button>
+  <button class="opt" data-correct="false" data-ex="错。process.env 里取出来的是字符串，不是布尔，所以不能直接当布尔用；正因如此我们才要 === 'production' 转成真正的布尔。">应该写 <code>process.env.NODE_ENV === true</code>，因为它是布尔值</button>
+  <button class="opt" data-correct="false" data-ex="错。恰恰相反——线上忘了设 NODE_ENV=production 是常见的「线上比本地慢」原因，Express 等库会因此跳过缓存等优化。">线上不用设 <code>NODE_ENV</code>，它只影响日志好不好看，不影响性能</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+<h3>⌨️ 动手：给 LinkPulse 接入 .env 和 pino</h3>
+<ol>
+<li>确认 Node 版本 ≥ 20：终端跑 <code>node -v</code>。</li>
+<li>在项目根目录新建 <code>.env</code>，写入：<code>PORT=3000</code>、<code>BASE_URL=http://localhost:3000</code>、<code>NODE_ENV=development</code>（各占一行）。</li>
+<li>新建/编辑 <code>.gitignore</code>，把 <code>.env</code> 加进去（再加 <code>node_modules/</code>）。<b>跑 <code>git status</code> 确认 <code>.env</code> 没出现在待提交列表里</b>——这一步最重要。</li>
+<li>顺手建一个 <code>.env.example</code>（只有键没有值：<code>PORT=</code> 等），<strong>这个</strong>可以 <code>git add</code>。</li>
+<li>装日志库：<code>npm install pino</code>，再 <code>npm install -D pino-pretty</code>。</li>
+<li>新建 <code>01-node-core/logger.js</code>，按第 6 节创建并 <code>export default logger</code>（级别随 NODE_ENV 变化）。</li>
+<li>改 <code>01-node-core/express-server.js</code>：删掉旧的 <code>console.log</code> 日志中间件，换成 pino 版（监听 <code>res.on('finish')</code>）；<code>app.listen</code> 的端口改成读 <code>Number(process.env.PORT)</code>，并用 <code>logger.info</code> 打启动日志。</li>
+<li>修改 <code>package.json</code> 的 <code>dev</code> 脚本为 <code>node --watch --env-file=.env 01-node-core/express-server.js</code>。</li>
+<li>跑 <code>npm run dev</code>，再用浏览器或 <code>curl</code> 访问 <code>http://localhost:3000/api/links</code>，确认终端打出的是<strong>带 method/url/status/ms 字段的 JSON 日志</strong>。</li>
+<li>加分项：把启动命令接上 <code>| npx pino-pretty</code>，对比美化前后的差别。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://getpino.io/" target="_blank" rel="noopener">pino 官方文档（getpino.io）</a> 与 <a href="https://nodejs.org/api/cli.html#--env-fileconfig" target="_blank" rel="noopener">Node.js 官方 <code>--env-file</code> 文档</a>。</div>
+
+<div class="ask">
+👩‍🏫 <b>跑通后发我：</b> ① 你的 <code>git status</code> 截图（证明 <code>.env</code> 没被 git 跟踪）；② 访问一次接口后，终端打出的那条请求 JSON 日志（含 <code>method/url/status/ms</code>）。<br>
+<strong>下一课预告：</strong> Lesson 0010 我们给 LinkPulse <strong>引入 TypeScript</strong>——从此代码用 <code>.ts</code> 写、带类型标注。本章的 <code>process.env</code> 在 TS 里会暴露一个经典坑（它的类型是 <code>string | undefined</code>），下一课正好顺势讲怎么优雅处理。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://nodejs.org/api/cli.html#--env-fileconfig" target="_blank" rel="noopener">Node.js 官方文档 · Command-line API · <code>--env-file</code> / <code>--env-file-if-exists</code></a>（v20.6.0 加入；v24.10/v22.21 起不再实验性；.env 格式、注释、引号、多行、多文件覆盖、与环境变量的优先级规则）。</li>
+    <li id="c2"><a href="https://nodejs.org/api/process.html#processenv" target="_blank" rel="noopener">Node.js 官方文档 · Process · <code>process.env</code></a>（「returns an object containing the user environment」；赋值会被隐式转成字符串；<code>process.loadEnvFile</code> v20.12.0 加入）。</li>
+    <li id="c3"><a href="https://www.npmjs.com/package/dotenv" target="_blank" rel="noopener">dotenv · npm 官方包文档</a>（<code>npm install dotenv</code>、<code>require('dotenv').config()</code> / <code>import 'dotenv/config'</code>；明确「不要把 .env 提交进版本控制」，应加入 .gitignore）。</li>
+    <li id="c4"><a href="https://12factor.net/config" target="_blank" rel="noopener">The Twelve-Factor App · III. Config</a>（在环境中存储配置；配置与代码严格分离；「能否随时开源而不泄露凭据」的试金石）。</li>
+    <li id="c5"><a href="https://expressjs.com/en/advanced/best-practice-performance.html" target="_blank" rel="noopener">Express 官方文档 · Performance Best Practices</a>（设置 <code>NODE_ENV=production</code> 可显著提升性能）。</li>
+    <li id="c6"><a href="https://getpino.io/" target="_blank" rel="noopener">pino 官方文档（getpino.io）</a>（「Super fast, all natural JSON logger」；基础用法与 JSON 输出示例 <code>{"level":30,...}</code>；pino-pretty 用于开发期美化）。</li>
+    <li id="c7"><a href="https://github.com/pinojs/pino/blob/main/docs/api.md" target="_blank" rel="noopener">pino 官方 API 文档（GitHub）</a>（<code>pino([options],[destination])</code>；日志级别 trace/debug/info/warn/error/fatal 及数值；<code>logger.info([mergingObject],[message])</code> 合并对象字段；<code>logger.child</code>）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0009 · 上一课 <a href="0008-router-and-layering.html">Router 与分层架构</a> · 下一课（预告）：<em>给 LinkPulse 引入 TypeScript</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

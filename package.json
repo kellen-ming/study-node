@@ -1,0 +1,21 @@
+{
+  "name": "study-node",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "node --watch 01-node-core/first-server.js",
+    "start": "node 01-node-core/first-server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "zod": "^4.4.3"
+  }
+}

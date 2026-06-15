@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0018 · 授权与 Web 安全加固</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：OWASP Top 10 表格 + 鉴权流程图 */
+.owasp{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.85rem}
+.owasp th,.owasp td{border:1px solid var(--border,#3a3a4a);padding:.45rem .6rem;text-align:left;vertical-align:top}
+.owasp th{background:rgba(120,120,200,.12)}
+.owasp tr:nth-child(even){background:rgba(255,255,255,.02)}
+.owasp .hit{color:#7ee787;font-weight:600}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:1rem 0;font-size:.82rem}
+.flow .box{border:1px solid var(--border,#3a3a4a);border-radius:8px;padding:.4rem .65rem;background:rgba(120,120,200,.08)}
+.flow .arr{opacity:.6}
+.flow .bad{border-color:#e5534b;background:rgba(229,83,75,.12)}
+.flow .ok{border-color:#7ee787;background:rgba(126,231,135,.12)}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0018 / 阶段 4</span></nav>
+<div class="kicker">Lesson 0018 · Node.js 后端之路</div>
+<h1>授权与 Web 安全加固</h1>
+
+<div class="mission">
+<b>为什么学这个？</b> 上一课你给 LinkPulse 加了<b>认证（Authentication）</b>——登录后签发 JWT，证明「你是谁」。但光知道你是谁还不够：现在 <code>POST /api/links</code> 任何人都能调，<code>DELETE /api/links/:id</code> 也没人拦——用户 A 能删用户 B 的短链。这一课补上<b>授权（Authorization）</b>：「你能不能做这件事」。我们会写 <code>requireAuth</code> 中间件保护接口、做<b>越权防护（IDOR）</b>让用户只能碰自己的短链、用 <code>helmet</code> 一行加固响应头、用 <code>express-rate-limit</code> 给登录接口限流防撞库，最后用 OWASP Top 10 给整个 LinkPulse 体检。做收费 SaaS，安全不是加分项，是底线。
+</div>
+
+<h2><span class="n">1</span>先分清：认证 vs 授权</h2>
+<p>这两个词中文都带「权」，但英文很清楚，<b>务必分开理解</b>：</p>
+<ul>
+<li><b>认证 Authentication（AuthN）</b>：确认「你是谁」。上一课的登录 + 验证 JWT 就是这一步。结果是一个「身份」——比如 <code>userId = 42</code>。</li>
+<li><b>授权 Authorization（AuthZ）</b>：确认「你能不能做这件事」。已知你是 42 号用户，那你能删 99 号短链吗？你的 plan 是 free，能用批量导出功能吗？这些都是授权问题。</li>
+</ul>
+<div class="note">类比：进公司大楼。<b>认证</b>是刷工牌进门（证明你是员工）；<b>授权</b>是你的工牌能不能开机房门（证明你有权限）。两者独立——能进门不代表能进机房。</div>
+<p>OWASP Top 10 2021 把「<b>Broken Access Control（失效的访问控制）</b>」列为<b>第一名风险</b>，官方数据是被测应用里 <b>94%</b> 存在某种访问控制缺陷<sup><a href="#c1">1</a></sup>。授权做不好，是当今 Web 应用最高频的漏洞来源——所以这一课分量很重。</p>
+
+<h2><span class="n">2</span>鉴权中间件 requireAuth：从 Bearer 取 JWT 到挂上 req.user</h2>
+<p>授权的第一步，是在每个受保护请求上「认出用户」。前端调受保护接口时会带一个 HTTP 头：</p>
+<pre><code>Authorization: Bearer &lt;你的 JWT&gt;</code></pre>
+<p><code>Bearer</code>（持有者）是 OAuth 2.0 定义的一种 token 类型，意思是「谁持有这个 token，谁就被当作合法用户」——所以 token 绝不能泄露。我们写一个<b>中间件（middleware）</b>，它的职责很单一：</p>
+<div class="flow">
+<span class="box">取 <code>Authorization</code> 头</span><span class="arr">→</span>
+<span class="box">切出 Bearer token</span><span class="arr">→</span>
+<span class="box">jwt.verify 验签 + 验过期</span><span class="arr">→</span>
+<span class="box ok">挂 req.user，next()</span>
+<span class="arr">／失败 →</span><span class="box bad">401 Unauthorized</span>
+</div>
+<div class="note"><b>快速复习（你前端见过中间件思想）：</b> Express 中间件就是 <code>(req, res, next) =&gt; {}</code> 的函数，能读改 <code>req</code>/<code>res</code>，然后 <code>next()</code> 放行或直接 <code>res</code> 结束。在后端它是「请求流水线上的一道工序」——鉴权就是其中一道。</p></div>
+
+<p>先扩展 Express 的类型，让 TS 知道 <code>req.user</code> 存在（在项目里建 <code>src/types/express.d.ts</code>）：</p>
+<pre><code>// src/types/express.d.ts —— 用声明合并给 Request 加上 user 字段
+import 'express';
+
+declare global {
+  namespace Express {
+    interface Request {
+      user?: { id: number; plan: 'free' | 'pro'; role: 'user' | 'admin' };
+    }
+  }
+}</code></pre>
+
+<p>然后是中间件本体。我们沿用上一课签发 JWT 时放进 payload 的字段（<code>sub</code> 放 userId，外加 <code>plan</code>、<code>role</code>）：</p>
+<pre><code>// src/middleware/requireAuth.ts
+import type { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+import { logger } from '../lib/logger.js'; // 第 16 课的 pino
+
+interface JwtPayload {
+  sub: string;                 // userId，JWT 标准字段 subject
+  plan: 'free' | 'pro';
+  role: 'user' | 'admin';
+}
+
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+
+  // 1) 没头、或格式不是 "Bearer xxx" → 401
+  if (!header?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const token = header.slice('Bearer '.length).trim();
+
+  try {
+    // 2) verify 会同时校验「签名是否被篡改」和「是否过期」
+    const payload = jwt.verify(token, process.env.JWT_SECRET!) as JwtPayload;
+
+    // 3) 挂到 req.user，后续 controller / 越权校验都用它
+    req.user = { id: Number(payload.sub), plan: payload.plan, role: payload.role };
+    next();
+  } catch (err) {
+    // 4) 签名错、过期、格式坏都进这里 —— 注意：对外只说 401，别回显内部错误
+    logger.warn({ err: (err as Error).name }, 'jwt verify failed');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+}</code></pre>
+
+<div class="rw">🌍 <b>实战：错误信息别泄露内部细节。</b> 上面 <code>catch</code> 里我们把真实原因（<code>TokenExpiredError</code> / <code>JsonWebTokenError</code>）只写进服务端日志，对外统一回 <code>401 Unauthorized</code>。如果你把 <code>err.message</code> 直接返回给前端，攻击者就能据此推断你的实现细节（用了什么库、token 哪里坏了），这正是 OWASP「Security Misconfiguration / 安全配置错误」的典型表现<sup><a href="#c1">1</a></sup>。Express 官方安全最佳实践也强调：生产环境要关掉详细错误堆栈的外泄<sup><a href="#c4">4</a></sup>。</div>
+
+<div class="rw">🌍 <b>实战：JWT 过期时间要短。</b> JWT 是<b>无状态</b>的——服务端不存它，签出去之后在过期前都有效，你没法「立即吊销」。所以一旦泄露，攻击者能用到过期为止。业界做法是 access token 设短（如 <code>15m</code>），配一个长效 refresh token 做续签。OWASP 在「失效的访问控制」防护建议里也明确写到要让 JWT 短命以缩小被利用的时间窗<sup><a href="#c1">1</a></sup>。</div>
+
+<h2><span class="n">3</span>保护 LinkPulse 的受保护路由</h2>
+<p>有了中间件，挂上去就是「保护」。在 LinkPulse 里，<b>创建 / 列表 / 改 / 删短链都必须登录</b>，但<b>跳转 <code>GET /:code</code> 是公开的</b>（任何人点短链都要能跳），所以不能全局挂，要按路由分。</p>
+<pre><code>// src/routes/links.route.ts
+import { Router } from 'express';
+import { requireAuth } from '../middleware/requireAuth.js';
+import * as ctrl from '../controllers/links.controller.js';
+
+const router = Router();
+
+// 整个 /api/links 子路由都要登录：挂在 router 级别一次搞定
+router.use(requireAuth);
+
+router.post('/', ctrl.createLink);
+router.get('/', ctrl.listMyLinks);       // 只列「我的」短链
+router.patch('/:id', ctrl.updateLink);
+router.delete('/:id', ctrl.deleteLink);
+
+export default router;</code></pre>
+<pre><code>// src/app.ts （节选）—— 注意公开跳转不经过 requireAuth
+app.use('/api/links', linksRouter);   // 受保护
+app.get('/:code', redirectHandler);   // 公开：短链跳转，不需要登录</code></pre>
+<div class="note"><code>router.use(requireAuth)</code> 把中间件挂在<b>这个子路由</b>上，下面所有路由都会先过它。比在每个 handler 前重复写一遍更不容易漏——<b>漏挂一个就是一个洞</b>。</div>
+
+<h2><span class="n">4</span>越权防护（IDOR）：用户只能碰自己的短链</h2>
+<p>这是本章的<b>核心</b>。<code>requireAuth</code> 只解决了「登录了没」，没解决「这资源是不是你的」。看一个真实会出的洞：</p>
+<pre><code>// ❌ 危险版：只要登录就能删 —— 但删的是谁的短链？没校验！
+export async function deleteLink(req: Request, res: Response) {
+  const id = Number(req.params.id);
+  await prisma.link.delete({ where: { id } });  // 用户 42 能删掉 99 号短链
+  res.status(204).end();
+}</code></pre>
+<p>用户 A 登录后，把 URL 里的 <code>:id</code> 换成别人的短链 id，就能删/改/看到别人的数据。这就是 <b>IDOR（Insecure Direct Object Reference，不安全的直接对象引用）</b>——OWASP 给的经典例子就是把请求参数从 <code>acct=自己</code> 改成 <code>acct=别人</code> 来访问他人资源<sup><a href="#c1">1</a></sup>。它属于「Broken Access Control」，<b>OWASP Top 10 第 1 名</b>。</p>
+
+<div class="rw">🌍 <b>实战：IDOR 是最高频漏洞之一，务必校验资源归属。</b> 它隐蔽在于——功能「看起来正常工作」，自己测自己的数据永远发现不了，只有换个 id 才暴露。修复原则就一句话：<b>每次操作资源，都要确认 <code>resource.userId === req.user.id</code></b>。OWASP 把「在应用层强制记录归属（enforce record ownership），而不是信任用户只访问自己的数据」列为头号防护建议<sup><a href="#c1">1</a></sup>。</div>
+
+<p>正确写法——把「取 + 校验归属 + 操作」放进 service 层，先查再判：</p>
+<pre><code>// src/services/links.service.ts
+import { prisma } from '../lib/prisma.js';
+
+// 自定义错误类型，让 controller 知道该回 404 还是 403
+export class NotFoundError extends Error {}
+export class ForbiddenError extends Error {}
+
+export async function deleteOwnedLink(linkId: number, userId: number) {
+  const link = await prisma.link.findUnique({ where: { id: linkId } });
+
+  // 1) 资源不存在 → 404
+  if (!link) throw new NotFoundError('link not found');
+
+  // 2) 资源存在但不属于你 → 403（关键的越权校验）
+  if (link.userId !== userId) throw new ForbiddenError('not your link');
+
+  // 3) 通过校验，才真正删除
+  await prisma.link.delete({ where: { id: linkId } });
+}</code></pre>
+<pre><code>// src/controllers/links.controller.ts
+export async function deleteLink(req: Request, res: Response, next: NextFunction) {
+  try {
+    await deleteOwnedLink(Number(req.params.id), req.user!.id);
+    res.status(204).end();
+  } catch (err) {
+    if (err instanceof NotFoundError)  return res.status(404).json({ error: 'Not Found' });
+    if (err instanceof ForbiddenError) return res.status(403).json({ error: 'Forbidden' });
+    next(err); // 其它丢给第 16 课的错误处理中间件
+  }
+}</code></pre>
+
+<p><b>列表查询同理</b>——别 <code>findMany()</code> 把所有人的短链全捞出来，要带上 <code>where: { userId }</code>，从数据库层就只返回「我的」：</p>
+<pre><code>export async function listMyLinks(userId: number) {
+  return prisma.link.findMany({
+    where: { userId },                 // ← 越权防护：天然只查自己的
+    orderBy: { createdAt: 'desc' },
+  });
+}</code></pre>
+
+<div class="note"><b>403 vs 404 的取舍：</b> 资源存在但不是你的，标准答案是 <code>403 Forbidden</code>（如上）。但更保守的做法是<b>统一返回 404</b>——这样攻击者连「这个 id 到底存不存在」都探测不出来（避免信息泄露）。两种都对，按你的威胁模型选；金融/隐私敏感场景倾向 404。</div>
+
+<h2><span class="n">5</span>RBAC 初步：用 role / plan 做权限分级</h2>
+<p>IDOR 防的是「同一种角色之间互相越权」。还有一类授权是「不同角色能做的事不同」——这叫 <b>RBAC（Role-Based Access Control，基于角色的访问控制）</b>：先把用户分成角色（如 <code>user</code> / <code>admin</code>），再按角色发权限。LinkPulse 的 <code>users</code> 表已经有 <code>plan</code> 字段（free/pro），认证章节也约定了 <code>role</code>，正好用来做<b>可组合的小中间件</b>：</p>
+<pre><code>// src/middleware/authorize.ts
+import type { Request, Response, NextFunction } from 'express';
+
+// 工厂函数：返回一个「只放行指定 role」的中间件
+export function requireRole(...roles: Array<'user' | 'admin'>) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    // 走到这里前必须已过 requireAuth，所以 req.user 一定有
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    next();
+  };
+}
+
+// 同理：限制只有付费 plan 才能用的功能
+export function requirePlan(...plans: Array<'free' | 'pro'>) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user || !plans.includes(req.user.plan)) {
+      return res.status(403).json({ error: 'Upgrade required' });
+    }
+    next();
+  };
+}</code></pre>
+<pre><code>// 用法：组合中间件，从左到右依次跑
+import { requireAuth } from '../middleware/requireAuth.js';
+import { requireRole, requirePlan } from '../middleware/authorize.js';
+
+// 后台统计只给管理员
+router.get('/admin/stats', requireAuth, requireRole('admin'), ctrl.adminStats);
+
+// 自定义短码是 pro 专属功能
+router.post('/links/custom', requireAuth, requirePlan('pro'), ctrl.createCustomLink);</code></pre>
+<div class="rw">🌍 <b>实战：授权要「deny by default（默认拒绝）」。</b> OWASP 的头号防护建议就是——除了公开资源，<b>默认一律拒绝，显式授权才放行</b><sup><a href="#c1">1</a></sup>。落到代码上：受保护路由<b>默认都挂 <code>requireAuth</code></b>，需要更高权限的再叠 <code>requireRole</code>/<code>requirePlan</code>；千万别反过来「默认开放，记得时再去加锁」——那样一定会漏。还要<b>把访问控制集中</b>（统一用这几个中间件），而不是每个 handler 各写各的 if，否则改一处漏十处。</div>
+
+<h2><span class="n">6</span>OWASP Top 10 概览：给 LinkPulse 体检</h2>
+<p><b>OWASP（Open Worldwide Application Security Project）</b>是公认的 Web 安全权威组织，它每隔几年发布的 <b>Top 10</b> 是「最关键的十大 Web 应用安全风险」清单<sup><a href="#c1">1</a></sup>。下面是 2021 版（当前最广泛引用的版本），并对照 LinkPulse 现状<sup><a href="#c2">2</a></sup>：</p>
+<table class="owasp">
+<thead><tr><th>#</th><th>风险（中英）</th><th>LinkPulse 里长什么样 / 我们怎么防</th></tr></thead>
+<tbody>
+<tr><td>A01</td><td><b>Broken Access Control</b> 失效的访问控制</td><td class="hit">本章重点：IDOR + RBAC + deny by default（第 4、5 节）</td></tr>
+<tr><td>A02</td><td>Cryptographic Failures 加密失误</td><td>密码用 bcrypt/argon2 hash（上一课）；线上强制 HTTPS；JWT_SECRET 进 .env</td></tr>
+<tr><td>A03</td><td>Injection 注入（SQL/命令注入）</td><td class="hit">Prisma 参数化查询天然防 SQL 注入；输入仍用 zod 校验</td></tr>
+<tr><td>A04</td><td>Insecure Design 不安全的设计</td><td>限流、归属校验从设计阶段就考虑，而非事后补</td></tr>
+<tr><td>A05</td><td><b>Security Misconfiguration</b> 安全配置错误</td><td class="hit">helmet 加固响应头（第 7 节）；关掉详细错误外泄</td></tr>
+<tr><td>A06</td><td>Vulnerable &amp; Outdated Components 组件过时</td><td><code>npm audit</code> 定期查；锁版本；及时升级依赖</td></tr>
+<tr><td>A07</td><td>Identification &amp; Authentication Failures 认证失效</td><td class="hit">登录限流防撞库（第 8 节）；JWT 短过期</td></tr>
+<tr><td>A08</td><td>Software &amp; Data Integrity Failures 完整性失误</td><td>package-lock.json 锁依赖；CI 校验来源</td></tr>
+<tr><td>A09</td><td>Security Logging &amp; Monitoring Failures 日志监控不足</td><td>pino 记录鉴权失败（第 2 节已加 warn 日志）</td></tr>
+<tr><td>A10</td><td>SSRF 服务端请求伪造</td><td>短链 target_url 若做预览抓取，需校验/限制目标地址</td></tr>
+</tbody>
+</table>
+<p><b>关于 XSS：</b> 跨站脚本（Cross-Site Scripting）在 2021 版被并入 A03 Injection。LinkPulse 是纯 JSON API，本身不直接渲染 HTML，XSS 风险主要在前端展示环节；但我们仍要靠 helmet 的 CSP 等头做纵深防御（下一节）。</p>
+
+<h2><span class="n">7</span>helmet：一行加固安全响应头</h2>
+<p><b>helmet</b> 是 Express 生态最常用的安全中间件，它通过设置一组 HTTP <b>响应头</b>来缓解常见攻击。<code>helmet()</code> 默认会设置约 <b>15 个</b>安全相关响应头，并移除 Express 默认暴露的 <code>X-Powered-By</code>（否则等于告诉别人「我用 Express」）<sup><a href="#c3">3</a></sup>。</p>
+<pre><code>npm i helmet</code></pre>
+<pre><code>// src/app.ts —— 越早挂越好，让所有响应都带上安全头
+import express from 'express';
+import helmet from 'helmet';
+
+const app = express();
+
+app.use(helmet());     // ← 一行，默认设置全套安全响应头
+
+app.use(express.json());
+// ... 路由</code></pre>
+<p>它设置的几个关键头（理解它们防什么，而不是只记住「加了就行」）：</p>
+<ul>
+<li><b>Content-Security-Policy（CSP）</b>：限制页面能加载哪些来源的脚本/样式，是防 XSS 的主力。</li>
+<li><b>Strict-Transport-Security（HSTS）</b>：告诉浏览器「以后只用 HTTPS 访问我」，防降级到明文 HTTP<sup><a href="#c3">3</a></sup>。</li>
+<li><b>X-Content-Type-Options: nosniff</b>：禁止浏览器「猜」内容类型，防 MIME 混淆攻击。</li>
+<li><b>X-Frame-Options</b>：禁止你的页面被 iframe 嵌套，防点击劫持（clickjacking）。</li>
+</ul>
+<div class="rw">🌍 <b>实战：helmet 一行加固，但 CSP 要按需调。</b> <code>app.use(helmet())</code> 几乎零成本，Express 官方安全最佳实践直接推荐使用它<sup><a href="#c4">4</a></sup>。坑在于默认 CSP 可能挡掉你前端的内联脚本/外部 CDN。如果 LinkPulse 是纯后端 API（不返回 HTML），可以放心用默认；如果同域托管前端页面，就要为 CSP 显式配置允许的来源，例如 <code>helmet({ contentSecurityPolicy: { directives: { ... } } })</code>，否则页面会白屏。</div>
+
+<h2><span class="n">8</span>express-rate-limit：给登录接口限流防撞库</h2>
+<p><b>限流（rate limiting）</b>就是限制「同一来源在一段时间内最多调多少次接口」。它能防<b>撞库 / 暴力破解（brute-force）</b>：攻击者拿着泄露的密码字典对 <code>/api/auth/login</code> 一秒打几百次，限流让他每分钟只能试几次，攻击成本飙升。</p>
+<pre><code>npm i express-rate-limit</code></pre>
+<pre><code>// src/middleware/rateLimiters.ts
+import { rateLimit } from 'express-rate-limit';
+
+// 1) 全局兜底：每个 IP 15 分钟内最多 100 次普通请求
+export const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,   // 时间窗：15 分钟（毫秒）
+  limit: 100,                 // 窗口内允许的最大请求数（v7 用 limit，旧版叫 max）
+  standardHeaders: 'draft-8', // 用标准的 RateLimit-* 响应头
+  legacyHeaders: false,       // 关掉老的 X-RateLimit-* 头
+  message: { error: 'Too many requests, please try again later.' },
+});
+
+// 2) 登录接口单独收紧：每 IP 15 分钟只许 5 次失败尝试
+export const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,                       // 比全局严得多 —— 这是防撞库的关键
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,   // 登录成功不计数，只数失败尝试
+  message: { error: 'Too many login attempts, try again in 15 minutes.' },
+});</code></pre>
+<p>选项名 <code>windowMs</code>（时间窗毫秒）、<code>limit</code>（窗口内上限）来自官方文档；超限时中间件会自动返回 <b>429 Too Many Requests</b><sup><a href="#c5">5</a></sup>。挂上去：</p>
+<pre><code>// src/app.ts
+import { apiLimiter, loginLimiter } from './middleware/rateLimiters.js';
+
+app.use(helmet());
+app.use('/api', apiLimiter);                  // 全局兜底
+app.use('/api/auth/login', loginLimiter);     // 登录单独严格限流
+app.use(express.json());
+// ... 路由</code></pre>
+<div class="rw">🌍 <b>实战：对登录接口单独限流防撞库。</b> 全站统一限流不够——登录是攻击重灾区，要给它<b>单独、更严</b>的策略（这里 5 次 vs 全局 100 次），并配 <code>skipSuccessfulRequests</code> 只惩罚失败尝试，避免误伤正常用户。注意默认按内存计数，<b>多实例部署会各算各的</b>（每台机器一份计数）——生产环境要换成 Redis store（你已经在用 ioredis），让限流跨实例共享，否则横向扩容后限流形同虚设<sup><a href="#c5">5</a></sup>。</div>
+
+<h2><span class="n">9</span>CORS 简述：浏览器跨域怎么放行</h2>
+<p><b>CORS（Cross-Origin Resource Sharing，跨域资源共享）</b>是浏览器的安全机制：默认情况下，<code>https://app.linkpulse.io</code> 的前端页面用 fetch 调 <code>https://api.linkpulse.io</code> 的后端，会被浏览器拦下（不同源）。后端需要显式返回 <code>Access-Control-Allow-Origin</code> 等响应头，浏览器才放行。</p>
+<pre><code>npm i cors</code></pre>
+<pre><code>// src/app.ts
+import cors from 'cors';
+
+app.use(cors({
+  origin: 'https://app.linkpulse.io',  // 只允许你自己的前端域名（别用 '*'）
+  credentials: true,                   // 若要带 cookie
+}));</code></pre>
+<div class="note"><b>常见误区：</b> CORS 不是用来「保护后端」的——它是约束<b>浏览器</b>的。curl、Postman、其它服务端调用根本不受 CORS 限制。所以真正的访问控制还得靠 <code>requireAuth</code> + 归属校验；CORS 只是控制「哪些网页能在浏览器里调你的 API」。生产配置时<b>白名单具体域名，别图省事写 <code>origin: '*'</code></b>。</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">越权 / IDOR</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">LinkPulse 的 <code>DELETE /api/links/:id</code> 已挂了 <code>requireAuth</code>，登录用户才能调。用户 42 登录后，把 URL 里的 id 改成别人的短链就把它删了。最根本的修复是？</p>
+  <button class="opt" data-correct="false" data-ex="加了限流只是减慢攻击速度，他照样能删别人的短链，越权问题没解决。">给该接口加 express-rate-limit 限流</button>
+  <button class="opt" data-correct="true" data-ex="正解：删除前先查出 link，校验 link.userId === req.user.id，不符就返回 403（或保守的 404）。这是在应用层强制记录归属，正是 OWASP 对 IDOR 的头号防护建议。">删除前校验 <code>link.userId === req.user.id</code>，不符返回 403</button>
+  <button class="opt" data-correct="false" data-ex="helmet 设置的是安全响应头，防的是 XSS/点击劫持等，跟「能不能删别人资源」的授权无关。">挂上 helmet 设置安全响应头</button>
+  <button class="opt" data-correct="false" data-ex="CORS 只约束浏览器跨域请求，curl/Postman 不受限，根本拦不住这种越权；且这是同源同接口的越权，与跨域无关。">配置 CORS 只允许自己的前端域名</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+<h3>⌨️ 动手：给 LinkPulse 接上授权与安全加固</h3>
+<ol>
+<li>新建 <code>src/types/express.d.ts</code>，用声明合并给 <code>Request</code> 加 <code>user?: { id; plan; role }</code>。</li>
+<li>实现 <code>src/middleware/requireAuth.ts</code>：取 <code>Authorization: Bearer</code> → <code>jwt.verify</code> → 挂 <code>req.user</code> → 失败统一 401（真实原因只进日志）。</li>
+<li>在 <code>links.route.ts</code> 用 <code>router.use(requireAuth)</code> 保护 <code>/api/links</code>；确认公开的 <code>GET /:code</code> 跳转<b>不</b>经过它。</li>
+<li>在 service 层给 <code>delete / update / get / list</code> 全部加上归属校验：先 <code>findUnique</code>，<code>userId !== req.user.id</code> 抛 <code>ForbiddenError</code>（→403）；列表用 <code>where:{ userId }</code>。</li>
+<li>写 <code>requireRole</code> / <code>requirePlan</code> 工厂中间件，给一个「pro 专属」或「admin 专属」接口挂上试试。</li>
+<li><code>npm i helmet express-rate-limit</code>；在 <code>app.ts</code> 顶部挂 <code>helmet()</code>、全局 <code>apiLimiter</code>、登录单独 <code>loginLimiter（limit:5）</code>。</li>
+<li><b>验证越权已堵：</b> 用两个账号各建一条短链，拿 A 的 token 去 <code>DELETE</code> B 的短链 id，确认返回 403 而不是 204。</li>
+<li><b>验证限流生效：</b> 对 <code>/api/auth/login</code> 连发 6 次错误密码，第 6 次应返回 429。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/" target="_blank" rel="noopener">OWASP Top 10:2021 — A01 Broken Access Control</a>（理解 IDOR 与 deny-by-default 的权威出处）。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> ① 你 <code>requireAuth</code> 验签失败时返回的状态码和 body；② 用 A 的 token 删 B 的短链时的响应（应为 403）；③ 第 6 次错误登录的响应头里 <code>RateLimit-*</code> 长什么样。<br><strong>下一课预告：</strong> 代码越加越多，service/middleware 开始重复——Lesson 0019 我们学<b>设计模式与 SOLID 原则</b>，把 LinkPulse 重构得可维护、可扩展。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/" target="_blank" rel="noopener">OWASP Top 10:2021 · A01 Broken Access Control</a>（失效的访问控制居 Top 10 第 1 名、94% 应用受影响；IDOR 示例；deny by default、强制记录归属、JWT 短命等防护建议）</li>
+    <li id="c2"><a href="https://owasp.org/Top10/2021/" target="_blank" rel="noopener">OWASP Top 10:2021 总览</a>（A01–A10 十大风险完整清单，含 XSS 并入 A03 Injection 的说明）</li>
+    <li id="c3"><a href="https://www.npmjs.com/package/helmet" target="_blank" rel="noopener">helmet · npm</a>（默认设置约 15 个安全响应头、移除 X-Powered-By、CSP/HSTS 等用法）</li>
+    <li id="c4"><a href="https://expressjs.com/en/advanced/best-practice-security/" target="_blank" rel="noopener">Express · Production Best Practices: Security</a>（官方推荐使用 helmet、限流、关闭错误细节外泄等）</li>
+    <li id="c5"><a href="https://www.npmjs.com/package/express-rate-limit" target="_blank" rel="noopener">express-rate-limit · npm</a>（windowMs / limit / standardHeaders 选项、429 响应、外部 store 支持）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0018 · 上一课 <a href="0017-auth-basics.html">认证基础（登录与 JWT）</a> · 下一课（预告）：<em>设计模式与 SOLID 原则</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

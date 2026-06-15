@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0019 · 后端设计模式与 SOLID：让代码可维护可测试</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：依赖关系箭头图 */
+.diparrow{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86rem;line-height:1.7;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1rem 1.1rem;overflow-x:auto}
+.diparrow .good{color:#4ade80}
+.diparrow .bad{color:#f87171}
+.diparrow .abs{color:#fbbf24}
+.smell{border-left:4px solid #f87171;background:#fef2f2;padding:.7rem 1rem;border-radius:0 8px 8px 0;margin:.8rem 0}
+.smell b{color:#dc2626}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0019 / 阶段 4</span></nav>
+<div class="kicker">Lesson 0019 · Node.js 后端之路</div>
+<h1>后端设计模式与 SOLID：让代码可维护可测试</h1>
+
+<div class="mission"><b>为什么学这个？</b> 你的 LinkPulse 已经能跑：创建短链 → 存库 → 302 跳转 → Redis 缓存。但 <code>LinkService</code> 里现在直接 <code>import prisma</code>、直接 <code>new</code> 出依赖，业务逻辑和「具体用哪个数据库」死死焊在一起。结果就是：<b>想写单元测试</b>，却绕不开真实数据库；<b>将来想换 ORM 或加一层缓存策略</b>，得翻遍 service 改一堆。本章用 <b>SOLID 原则 + 依赖注入(DI) + Repository 模式</b> 给 LinkPulse 的 service 层做一次「松绑」，让它<b>可维护、可测试、可扩展</b>——这正是下一章「自动化测试」能顺利落地的前提。</div>
+
+<h2><span class="n">1</span>先问：我们到底在解决什么痛？（不是炫技）</h2>
+
+<p>设计模式（design pattern）的坏名声，多半来自「为了用而用」。所以开篇先把目的钉死：<b>设计模式不是让代码更高级，而是让代码<u>更容易应对变化、更容易被测试</u>。</b>权威定义里，设计模式是「软件设计中常见问题的典型解决方案」<sup><a href="#c2">2</a></sup>——注意关键词是<b>问题</b>。没有问题，就不要套模式。</p>
+
+<p>来看 LinkPulse 现在的 <code>LinkService</code>（你 0016 之前大概率写成这样）：</p>
+
+<pre><code>// src/services/link.service.ts —— 重构前
+import { prisma } from '../db.js';            // ← 直接依赖具体的 Prisma 实例
+import { redis } from '../redis.js';          // ← 直接依赖具体的 Redis 实例
+import { nanoid } from 'nanoid';
+
+export async function createLink(userId: string, targetUrl: string) {
+  const shortCode = nanoid(7);
+  // 业务逻辑（生成短码、校验配额）和「怎么存」混在一起
+  const link = await prisma.link.create({
+    data: { userId, shortCode, targetUrl },
+  });
+  return link;
+}
+
+export async function resolve(shortCode: string) {
+  const cached = await redis.get(`link:${shortCode}`);
+  if (cached) return cached;
+  const link = await prisma.link.findUnique({ where: { shortCode } });
+  if (link) await redis.set(`link:${shortCode}`, link.targetUrl, 'EX', 3600);
+  return link?.targetUrl ?? null;
+}</code></pre>
+
+<p>它现在<b>能跑</b>。问题不在「跑不跑」，在于<b>它对变化和测试有多脆弱</b>：</p>
+
+<div class="smell"><b>坏味道 1 · 没法单测。</b> 想测「创建短链时配额超了要报错」，但函数里 <code>prisma.link.create</code> 是写死的——跑测试就得连真数据库，慢、脏、还要清表。</div>
+<div class="smell"><b>坏味道 2 · 牵一发动全身。</b> 老板说「我们要从 Prisma 换成 Drizzle」或「读走只读副本」，你得逐个函数改 SQL/ORM 调用，业务规则被迫陪绑修改。</div>
+<div class="smell"><b>坏味道 3 · 职责混杂。</b> 一个函数同时干了三件事：生成短码（业务）、存数据库（持久化）、写缓存（基础设施）。看似省事，实则没有一处能单独替换或复用。</div>
+
+<div class="note">本章目标不是把这些「坏味道」喷一顿，而是用 <b>SRP</b>（拆职责）+ <b>DIP</b>（依赖抽象）+ <b>DI</b>（外部注入）+ <b>Repository</b>（封装数据访问）四件套，把上面这段重构成「业务归业务、存储归存储、能注入假货来测试」的形态。</div>
+
+<h2><span class="n">2</span>SOLID 五原则——用后端例子讲透</h2>
+
+<p>SOLID 是 Robert C. Martin（Uncle Bob）提炼的五条面向对象设计原则的首字母缩写，目标是<b>提升代码的健壮性与可维护性</b><sup><a href="#c1">1</a></sup>。前端的你对「组件拆分」「props 解耦」其实早有直觉，这里只是把它系统化到后端的 service/repository 层。逐条快速过，重点放在 LinkPulse 真正用得到的 <b>SRP</b> 和 <b>DIP</b>。</p>
+
+<p><b>S · SRP 单一职责原则（Single Responsibility）</b>：一个类/模块<b>应当只有一个改变它的理由</b>，所有方法都服务于这一个职责<sup><a href="#c1">1</a></sup>。<br>
+<i>类比：</i>餐厅里厨师只管做菜、收银只管收钱。让厨师兼收银，换收银系统时还得培训厨师——耦合了。<br>
+<i>后端语境：</i>上面 <code>createLink</code> 同时承担「业务规则」「数据库持久化」「缓存写入」三个会各自独立变化的理由，违反 SRP。我们要把「持久化」抽到 Repository、把「缓存」抽成单独一层。</p>
+
+<p><b>O · OCP 开闭原则（Open/Closed）</b>：对扩展开放、对修改关闭——加新功能时尽量<b>新增代码</b>而非<b>改老代码</b>。<br>
+<i>后端例子：</i>短码生成将来要支持「随机 nanoid」和「自定义别名」两种方式，理想做法是新增一个策略类，而不是在 <code>createLink</code> 里塞 <code>if/else</code>（第 5 节的策略模式正为此而来）。</p>
+
+<p><b>L · LSP 里氏替换原则（Liskov Substitution）</b>：子类型必须能<b>无声替换</b>父类型而不破坏程序。<br>
+<i>后端例子：</i>任何一个 <code>LinkRepository</code> 的实现（Prisma 版、内存版、Mock 版）都必须遵守同一份接口契约——传同样的参数、返回同样形状的结果，调用方不需要知道用的是哪个。这正是单测能用「假仓库」替换「真仓库」的理论保证。</p>
+
+<p><b>I · ISP 接口隔离原则（Interface Segregation）</b>：不要强迫调用方依赖它用不到的方法；宁可拆成多个小接口。<br>
+<i>后端例子：</i>负责跳转的代码只需要 <code>findByCode</code>，就不该被迫依赖一个还带 <code>delete/updatePlan</code> 的「大而全」接口。接口拆小，依赖才精准。</p>
+
+<p><b>D · DIP 依赖倒置原则（Dependency Inversion）</b>：<b>高层模块不应依赖低层模块，两者都应依赖抽象</b>；抽象不应依赖细节，细节应依赖抽象<sup><a href="#c1">1</a></sup>。它让代码更模块化、灵活、可维护<sup><a href="#c1">1</a></sup>。<br>
+<i>类比：</i>笔记本电脑的 USB 口（抽象）不在乎你插的是哪个牌子的硬盘（细节）。电脑（高层）和硬盘（低层）都依赖「USB 协议」这个抽象。<br>
+<i>后端语境：</i>我们的 <code>LinkService</code>（高层业务）现在直接依赖 <code>prisma</code>（低层细节）。DIP 要求把方向「倒过来」：让 <code>LinkService</code> 依赖一个 <code>LinkRepository</code> <b>接口</b>（抽象），而 Prisma 实现去满足这个接口。</p>
+
+<div class="diparrow">
+<span class="bad">重构前（违反 DIP）：</span>  LinkService  ──依赖──▶  Prisma 具体实现
+                          (高层业务)              (低层细节)
+
+<span class="good">重构后（满足 DIP）：</span>  LinkService  ──依赖──▶  <span class="abs">LinkRepository 接口</span>  ◀──实现──  PrismaLinkRepository
+                          (高层业务)         <span class="abs">(抽象)</span>                        (低层细节)
+</div>
+
+<p>注意箭头方向：重构后 <b>Prisma 实现反过来依赖（指向）接口</b>了——这就是「倒置」二字的由来。高层不再被低层牵着走。</p>
+
+<h2><span class="n">3</span>依赖注入(DI)：把依赖从「内部 new」改成「外部传入」</h2>
+
+<p><b>依赖注入（Dependency Injection，DI）</b>是落实 DIP 的具体手法。一句话定义：<b>一个对象需要的依赖，不由它自己 <code>new</code> 或 <code>import</code> 出来，而是从外部（通常是构造函数）传进去。</b></p>
+
+<p><i>类比：</i>你不会让汽车自己「在车间里造一台引擎」；而是<b>装配线把引擎递给汽车</b>。引擎坏了或要换型号，换的是「递进来的那台」，汽车本身不用改。NestJS 这类框架正是把这种「DI 设计模式」做成了框架核心——其官方文档明确说「Nest 围绕依赖注入这一强大设计模式构建」<sup><a href="#c3">3</a></sup>。</p>
+
+<div class="cmp">
+<div><h4>❌ 内部自己拿依赖（紧耦合）</h4>
+<pre><code>import { prisma } from '../db.js';
+
+class LinkService {
+  // 依赖被焊死在类内部，
+  // 测试时无法替换
+  async create(url: string) {
+    return prisma.link.create({
+      data: { targetUrl: url },
+    });
+  }
+}</code></pre></div>
+<div><h4>✅ 构造函数注入（松耦合）</h4>
+<pre><code>class LinkService {
+  // 依赖从外部传入，
+  // 测试时可换成 mock
+  constructor(
+    private readonly repo: LinkRepository,
+  ) {}
+
+  async create(url: string) {
+    return this.repo.create({ targetUrl: url });
+  }
+}</code></pre></div>
+</div>
+
+<p>右边的 <code>private readonly repo: LinkRepository</code> 是 TypeScript 的「<b>构造函数参数属性</b>」语法糖：在构造参数上加访问修饰符，TS 会自动把它赋成实例属性，等价于手写 <code>this.repo = repo</code>。它接收的类型是<b>接口</b>，不是某个具体类——这就是 DIP 在代码里的样子。</p>
+
+<div class="rw">🌍 <b>实战：DI 是「可测试」的开关。</b> 没有 DI，单元测试要么连真数据库（慢且不稳定），要么靠 <code>jest.mock('../db.js')</code> 去黑魔法劫持模块（脆弱、改路径就崩）。有了构造函数注入，测试里只需 <code>new LinkService(fakeRepo)</code>，把一个返回固定数据的「假仓库」递进去，就能在毫秒级、零依赖地验证业务规则。下一章写测试时你会直接享受到这个红利——记住：<b>DI 是为可测试性服务的，不是为了好看。</b></div>
+
+<h2><span class="n">4</span>Repository 模式：把 Prisma 调用关进笼子</h2>
+
+<p><b>Repository（仓库）模式</b>是一种架构模式：<b>把所有数据访问的细节（这里就是 Prisma 调用）集中封装到一个对象里，对外只暴露「像操作集合一样」的方法</b>（<code>create / findByCode / incrementClicks</code> …）。业务层只跟这些语义化方法打交道，完全不知道底层是 Prisma 还是 SQL 还是内存数组。</p>
+
+<p>它和上面的 DIP/DI 是天作之合：<b>先定义 Repository 接口（抽象），再写 Prisma 实现（细节），最后把实现注入给 service。</b></p>
+
+<h3 style="margin-top:1.4rem">① 定义接口（抽象）</h3>
+<pre><code>// src/repositories/link.repository.ts
+// 这是「契约」：业务层只认它，不认 Prisma
+
+export interface CreateLinkInput {
+  userId: string;
+  shortCode: string;
+  targetUrl: string;
+}
+
+export interface LinkRecord {
+  id: string;
+  userId: string;
+  shortCode: string;
+  targetUrl: string;
+  clickCount: number;
+  createdAt: Date;
+}
+
+export interface LinkRepository {
+  create(input: CreateLinkInput): Promise&lt;LinkRecord&gt;;
+  findByCode(shortCode: string): Promise&lt;LinkRecord | null&gt;;
+  incrementClicks(id: string): Promise&lt;void&gt;;
+}</code></pre>
+
+<div class="note"><b>为什么自己定义 <code>LinkRecord</code> 而不直接用 Prisma 生成的类型？</b> 因为一旦接口里出现 <code>Prisma.Link</code>，抽象就「漏」了——你又把业务层和 Prisma 绑回去了。自定义领域类型让接口保持「ORM 无关」，这正是 DIP 想要的纯粹抽象。（小项目里直接复用 Prisma 类型也行，看下文 YAGNI 取舍。）</div>
+
+<h3 style="margin-top:1.4rem">② 写 Prisma 实现（细节）</h3>
+<pre><code>// src/repositories/prisma-link.repository.ts
+import type { PrismaClient } from '@prisma/client';
+import type {
+  LinkRepository, CreateLinkInput, LinkRecord,
+} from './link.repository.js';
+
+export class PrismaLinkRepository implements LinkRepository {
+  // 连 PrismaClient 也是注入进来的，不在内部 new
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async create(input: CreateLinkInput): Promise&lt;LinkRecord&gt; {
+    return this.prisma.link.create({ data: input });
+  }
+
+  async findByCode(shortCode: string): Promise&lt;LinkRecord | null&gt; {
+    return this.prisma.link.findUnique({ where: { shortCode } });
+  }
+
+  async incrementClicks(id: string): Promise&lt;void&gt; {
+    await this.prisma.link.update({
+      where: { id },
+      data: { clickCount: { increment: 1 } },
+    });
+  }
+}</code></pre>
+
+<p><code>implements LinkRepository</code> 让 TS 编译期帮你保证：这个类<b>确实兑现了接口契约</b>（少一个方法、签名不对都会编译报错）。这正是 LSP 里「子类型可无声替换」的静态保障。</p>
+
+<h3 style="margin-top:1.4rem">③ service 依赖接口（高层业务，干净了）</h3>
+<pre><code>// src/services/link.service.ts —— 重构后
+import { nanoid } from 'nanoid';
+import type { LinkRepository } from '../repositories/link.repository.js';
+
+export class LinkService {
+  constructor(private readonly repo: LinkRepository) {}  // ← DI 注入抽象
+
+  async createLink(userId: string, targetUrl: string) {
+    // 这里只剩纯业务：生成短码 + 委托仓库持久化
+    const shortCode = nanoid(7);
+    return this.repo.create({ userId, shortCode, targetUrl });
+  }
+
+  async resolve(shortCode: string): Promise&lt;string | null&gt; {
+    const link = await this.repo.findByCode(shortCode);
+    return link?.targetUrl ?? null;
+  }
+}</code></pre>
+
+<p>看 <code>LinkService</code> 现在的样子：<b>没有 <code>import prisma</code></b>，整个类不知道数据库的存在，只知道「有个仓库能 create/findByCode」。SRP 达成（业务归业务），DIP 达成（依赖抽象），DI 达成（构造函数注入）。</p>
+
+<div class="rw">🌍 <b>实战：Repository 让「换底层」不再地动山摇。</b> 真实项目里换 ORM/数据库的需求很常见——团队从 Prisma 迁 Drizzle、把热点读改走只读副本、给某些查询加 DataLoader 批处理。有了 Repository，这些改动<b>全部锁在 <code>PrismaLinkRepository</code> 这一个文件里</b>，新建一个 <code>DrizzleLinkRepository implements LinkRepository</code>，入口换一行装配即可，<code>LinkService</code> 和上百个测试一字不改。这就是「细节依赖抽象」付的利息。</div>
+
+<h3 style="margin-top:1.4rem">④ 在入口「手动装配」（poor man's DI）</h3>
+<p>没用 NestJS，那谁来 <code>new</code> 这些对象、谁把仓库递给 service？答案是<b>在应用入口（组合根 Composition Root）集中手动组装</b>。这是整个程序里唯一允许大量 <code>new</code> 的地方：</p>
+
+<pre><code>// src/main.ts （或 app.ts 入口）—— 组合根：只在这里 new
+import { PrismaClient } from '@prisma/client';
+import { PrismaLinkRepository } from './repositories/prisma-link.repository.js';
+import { LinkService } from './services/link.service.js';
+import { buildLinkRouter } from './routes/link.route.js';
+
+// 1) 创建最底层细节
+const prisma = new PrismaClient();
+
+// 2) 用细节装配仓库（实现）
+const linkRepo = new PrismaLinkRepository(prisma);
+
+// 3) 把仓库注入业务 service
+const linkService = new LinkService(linkRepo);
+
+// 4) 把 service 交给路由层（controller 也靠注入拿 service）
+app.use('/api/links', buildLinkRouter(linkService));</code></pre>
+
+<p>路由层不再 <code>import</code> 单例 service，而是接收传入的实例：</p>
+<pre><code>// src/routes/link.route.ts
+import { Router } from 'express';
+import type { LinkService } from '../services/link.service.js';
+
+export function buildLinkRouter(service: LinkService): Router {
+  const router = Router();
+  router.post('/', async (req, res, next) =&gt; {
+    try {
+      const link = await service.createLink(req.user!.id, req.body.targetUrl);
+      res.status(201).json(link);
+    } catch (e) { next(e); }
+  });
+  return router;
+}</code></pre>
+
+<div class="note"><b>「组合根」一句话理解：</b> 整个 App 的依赖图，集中在入口处一次性「接线」完成。越往里（service、repository）越纯粹、越不知道彼此是怎么被创建的；越往外（main.ts）越知道全貌、负责拼装。这样依赖方向永远从外向内，符合 DIP。NestJS 做的事，本质就是用 <code>@Injectable()</code> 和模块系统<b>自动化</b>了这个装配过程<sup><a href="#c3">3</a></sup>——它把 service、repository、factory 都当作可注入的「provider」，由框架按类型自动解析并构造<sup><a href="#c3">3</a></sup>。本课不切换框架，仍用 Express + 手动 DI；理解了手动版，将来读 NestJS 会秒懂。</div>
+
+<h2><span class="n">5</span>顺带认识：工厂模式 & 策略模式</h2>
+
+<p>这两个是 Gang of Four 经典模式，LinkPulse 后续会自然用到，先建立直觉。</p>
+
+<p><b>工厂方法（Factory Method）</b>：一种创建型模式，<b>提供一个用于创建对象的方法，用它代替直接 <code>new</code></b>，从而把「创建逻辑」集中、可替换<sup><a href="#c2">2</a></sup>。我们上面的「组合根」其实就是最朴素的手写工厂；当装配逻辑复杂（不同环境用不同实现）时，会抽成专门的工厂函数：</p>
+
+<pre><code>// 一个简单工厂：按环境产出不同的仓库实现
+export function makeLinkRepository(env: string): LinkRepository {
+  if (env === 'test') return new InMemoryLinkRepository();  // 测试用内存版
+  return new PrismaLinkRepository(new PrismaClient());       // 生产用 Prisma 版
+}</code></pre>
+
+<p><b>策略模式（Strategy）</b>：一种行为型模式，<b>把一组可互换的算法各自封装成类，让它们能在运行时互相替换</b><sup><a href="#c4">4</a></sup>。它常被框架用来「让用户改变某个类的行为而无需继承它」<sup><a href="#c4">4</a></sup>。对应到 LinkPulse 的「短码生成」——既要随机 nanoid，又要支持付费用户自定义别名：</p>
+
+<pre><code>// 策略接口：一族「生成短码」的算法
+export interface ShortCodeStrategy {
+  generate(input: { targetUrl: string; alias?: string }): string;
+}
+
+export class RandomCodeStrategy implements ShortCodeStrategy {
+  generate() { return nanoid(7); }
+}
+export class CustomAliasStrategy implements ShortCodeStrategy {
+  generate({ alias }: { alias?: string }) {
+    if (!alias) throw new Error('alias required');
+    return alias;
+  }
+}
+
+// LinkService 注入「策略」，新增生成方式无需改 service（OCP）
+class LinkService {
+  constructor(
+    private readonly repo: LinkRepository,
+    private readonly codeStrategy: ShortCodeStrategy,
+  ) {}
+  async createLink(userId: string, targetUrl: string) {
+    const shortCode = this.codeStrategy.generate({ targetUrl });
+    return this.repo.create({ userId, shortCode, targetUrl });
+  }
+}</code></pre>
+
+<p>注意：策略也是<b>通过 DI 注入</b>的。将来加「带校验前缀的短码」只需 <code>new</code> 一个新策略类、在组合根换上去——<code>LinkService</code> 一行不改，这就是 OCP「对扩展开放、对修改关闭」。</p>
+
+<h2><span class="n">6</span>别过度设计：YAGNI 与「为真实痛点而抽象」</h2>
+
+<p>讲完一堆模式，最重要的反向提醒来了：<b>模式是用来还「真实痛点」的债，不是预付未来的款。</b>有个原则叫 <b>YAGNI（You Aren't Gonna Need It，你不会需要它）</b>——在你<b>真正</b>需要某个灵活性之前，不要为它增加抽象。</p>
+
+<div class="rw">🌍 <b>实战：过度设计是另一种技术债。</b> 我见过给只有一个实现、永远不会有第二个的功能也套上「接口 + 工厂 + 抽象基类」的代码——每加一个字段要改五个文件，新人读两小时才找到真正干活的地方。判断标准很简单：<b>这个抽象现在就能换来「可测试」或「已知的、明确的可替换需求」吗？</b>能，就抽（比如 LinkRepository——它直接换来了单测能力，值）；只是「万一以后呢」，就先别抽，等第二个实现真出现时再重构（那时也只是几分钟的事）。<b>先让代码工作，被真实变化推着演进，胜过一开始就建造空中楼阁。</b></div>
+
+<p>对 LinkPulse 的务实建议：<b>Repository + DI 这一层值得现在就做</b>（因为它直接解锁了下一章的测试，且换 ORM 是真实存在的中长期风险）；而「自定义领域类型 vs 复用 Prisma 类型」「策略模式要不要现在上」这类，<b>等需求落地再说</b>——小团队初期直接在接口里复用 Prisma 生成的类型完全可以接受，等抽象真带来痛苦时再纯化。</p>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">DIP / DI</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">为什么把 <code>LinkService</code> 改成「构造函数接收一个 <code>LinkRepository</code> 接口」，比直接在内部 <code>import prisma</code> 更好？</p>
+  <button class="opt" data-correct="true" data-ex="正解。依赖抽象 + 外部注入(DIP/DI)，测试时可传入返回固定数据的假仓库，无需连真数据库；换 ORM 也只改实现类，业务与测试不动。">因为业务层只依赖抽象接口，测试时能注入 mock 仓库、将来换底层实现也不影响 service</button>
+  <button class="opt" data-correct="false" data-ex="错。接口和 DI 是为了解耦与可测试，对运行时性能没有正向帮助，甚至多一层间接调用。">因为接口和依赖注入能让程序运行得更快</button>
+  <button class="opt" data-correct="false" data-ex="错。Prisma 仍在 PrismaLinkRepository 里照常使用；改的是『谁依赖谁』的方向，不是抛弃 Prisma。">因为这样就完全不用再写任何 Prisma 代码了</button>
+  <button class="opt" data-correct="false" data-ex="错。恰恰相反，目的是减少类型上的耦合；而且这与是否用 TypeScript 类型无关，纯 JS 也能做 DI。">因为接口能让 service 和数据库类型绑定得更紧密</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task"><h3>⌨️ 动手：给 LinkPulse 的 LinkService 松绑</h3>
+<ol>
+<li>新建 <code>src/repositories/link.repository.ts</code>，定义 <code>LinkRepository</code> 接口（含 <code>create</code> / <code>findByCode</code> / <code>incrementClicks</code>）和领域类型 <code>LinkRecord</code>。</li>
+<li>新建 <code>src/repositories/prisma-link.repository.ts</code>，写 <code>class PrismaLinkRepository implements LinkRepository</code>，<code>PrismaClient</code> 由构造函数注入。</li>
+<li>重构 <code>src/services/link.service.ts</code>：改成 <code>class LinkService</code>，删除所有 <code>import prisma</code>，改为构造函数接收 <code>repo: LinkRepository</code>。</li>
+<li>在入口（<code>main.ts</code>）做「手动 DI」：<code>new PrismaClient()</code> → <code>new PrismaLinkRepository(prisma)</code> → <code>new LinkService(repo)</code>，再把 service 传给路由 <code>buildLinkRouter(service)</code>。</li>
+<li><b>验证抽象生效（关键）</b>：再写一个 <code>InMemoryLinkRepository implements LinkRepository</code>，用普通数组存数据；临时把它注入 <code>LinkService</code> 跑一次创建+解析。如果 service 一行不用改就能工作，说明你的抽象是对的——这就是下一章单测的基础。</li>
+<li><i>选做</i>：把短码生成抽成 <code>ShortCodeStrategy</code>，新增 <code>CustomAliasStrategy</code>，注入到 service。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://refactoring.guru/design-patterns" target="_blank" rel="noopener">Refactoring.Guru · Design Patterns</a>（设计模式、SOLID、重构的权威科普，含 TypeScript 示例）。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> 你的 <code>LinkRepository</code> 接口定义、<code>PrismaLinkRepository</code> 实现，以及 <code>main.ts</code> 里手动装配的那几行；顺便说说你把 <code>InMemoryLinkRepository</code> 注入后 <code>LinkService</code> 是否真的没改。 <br><strong>下一课预告：</strong> Lesson 0020《后台任务与队列》——把「记录点击、统计 click_count」这类耗时活儿从请求主线程挪到后台 job/queue（如 BullMQ + Redis）异步处理，让 302 跳转更快。而本章打好的 DI/Repository 基础，会让那些异步处理逻辑同样好测试。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://stackify.com/dependency-inversion-principle/" target="_blank" rel="noopener">Stackify · SOLID Design Principles: Dependency Inversion</a>（SOLID 由 Robert C. Martin 提出；SRP「只有一个改变的理由」、DIP「高层与低层都依赖抽象」的权威表述）。</li>
+    <li id="c2"><a href="https://refactoring.guru/design-patterns" target="_blank" rel="noopener">Refactoring.Guru · Design Patterns</a>（设计模式定义：常见问题的典型解决方案；工厂方法用方法代替直接 new 创建对象）。</li>
+    <li id="c3"><a href="https://docs.nestjs.com/providers" target="_blank" rel="noopener">NestJS 官方文档 · Providers</a>（「Nest 围绕依赖注入设计模式构建」；service/repository/factory 均为可注入的 provider，由框架按类型自动解析）。</li>
+    <li id="c4"><a href="https://refactoring.guru/design-patterns/strategy" target="_blank" rel="noopener">Refactoring.Guru · Strategy Pattern</a>（策略模式定义：把一族算法各自封装、运行时可互换；常用于让框架使用者改变类行为而无需继承）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0019 · 上一课 <a href="0018-authz-and-security.html">授权与安全</a> · 下一课（预告）：<em>后台任务与队列</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

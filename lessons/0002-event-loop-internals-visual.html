@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0002 · 事件循环内部机制（图解）</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  /* —— 本课专用可视化样式 —— */
+  .fig{margin:1.4rem 0; text-align:center}
+  .cap{font-size:.8rem; color:var(--muted); margin-top:.5rem; line-height:1.5; text-align:left}
+
+  /* 调用栈 */
+  .callstack{display:inline-flex; flex-direction:column; gap:3px; min-width:16em}
+  .frame{background:#fbf7ee; border:1px solid var(--accent); border-radius:5px; padding:.45rem .7rem; font-size:.82rem; font-family:"SF Mono",Menlo,monospace}
+  .frame.top{background:var(--accent); color:#fff}
+
+  /* 运行时分层 */
+  .runtime{display:inline-block; text-align:left; border:2px solid var(--ink); border-radius:10px; padding:.8rem; background:#fffefb; max-width:30em}
+  .rt-title{font-size:.8rem; color:var(--muted); text-align:center; margin-bottom:.6rem}
+  .layer{border-radius:7px; padding:.55rem .7rem; margin:.4rem 0; font-size:.83rem}
+  .layer b{display:block; font-size:.78rem; letter-spacing:.04em; margin-bottom:.35rem}
+  .layer .slot{background:#fff; border:1px dashed var(--rule); border-radius:4px; padding:.3rem .55rem; margin:.25rem 0; font-family:"SF Mono",Menlo,monospace; font-size:.78rem}
+  .layer.v8{background:#eef3f7; border:1px solid #9bb7c9}
+  .layer.node{background:#f3eef7; border:1px solid #b39bc9}
+  .layer.libuv{background:#f0f4ee; border:1px solid #a3c09b}
+
+  /* 阶段 */
+  .phases{list-style:none; padding:0; margin:0 auto; max-width:30em; text-align:left}
+  .phases li{border:1px solid var(--rule); border-left:4px solid var(--accent); border-radius:6px; padding:.5rem .8rem; margin:.4rem 0; font-size:.85rem; background:#fffefb}
+  .phases li b{color:var(--accent)}
+  .phases li.hot{background:#fbf7ee; border-left-width:6px}
+  .phases li.loopback{border:1px dashed var(--accent); text-align:center; color:var(--accent); background:none}
+
+  /* 逐步动画 */
+  .stepper{border:1px solid var(--rule); border-radius:10px; padding:1rem 1.1rem; margin:1.4rem 0; background:#fffefb}
+  .stepper .code{font-size:.78rem; margin:.2rem 0 .9rem}
+  .cl{display:block; padding:.05rem .3rem; border-radius:3px; transition:.15s}
+  .cl.hl{background:#fff3b0; box-shadow:inset 3px 0 0 var(--accent)}
+  .phase-label{font-weight:600; font-size:.92rem; color:var(--accent); margin:.3rem 0 .6rem; min-height:1.2em}
+  .lanes{display:grid; grid-template-columns:1fr 1fr; gap:.5rem; margin:.5rem 0}
+  .lane{border:1px solid var(--rule); border-radius:6px; padding:.45rem .55rem; background:#fcfbf5; min-height:4.4em}
+  .lane h4{margin:0 0 .35rem; font-size:.72rem; letter-spacing:.03em; color:var(--muted); font-weight:600}
+  .chips{display:flex; flex-wrap:wrap; gap:.3rem}
+  .chip{font-family:"SF Mono",Menlo,monospace; font-size:.73rem; background:#fff; border:1px solid var(--rule); border-radius:4px; padding:.2rem .45rem}
+  .chip.running{background:var(--accent); color:#fff; border-color:var(--accent)}
+  .empty{font-size:.73rem; color:#bbb}
+  .console{font-family:"SF Mono",Menlo,monospace; font-size:.86rem; background:#1a1a17; color:#f0eecf; border-radius:6px; padding:.55rem .8rem; margin:.6rem 0}
+  .console .lbl{color:#8a8770; font-size:.72rem; margin-right:.6rem}
+  .desc{font-size:.86rem; background:#f4f1e4; border-radius:6px; padding:.6rem .8rem; margin:.5rem 0; min-height:2.6em; line-height:1.5}
+  .desc.key{background:#fff3b0; border:1px solid var(--accent)}
+  .controls{display:flex; align-items:center; gap:.6rem; margin-top:.6rem}
+  .controls button{font:inherit; font-size:.82rem; padding:.4rem .8rem; border:1px solid var(--accent); background:#fff; color:var(--accent); border-radius:6px; cursor:pointer}
+  .controls button:hover:not(:disabled){background:var(--accent); color:#fff}
+  .controls button:disabled{opacity:.4; cursor:default}
+  .stepcount{font-size:.78rem; color:var(--muted); margin-left:auto}
+  @media(max-width:480px){ .lanes{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0002 / 阶段 1</span>
+</nav>
+
+<div class="kicker">Lesson 0002 · Node.js 后端之路</div>
+<h1>事件循环的内部机制：<br>调用栈、队列，与各个阶段（图解）</h1>
+
+<div class="mission">
+  <b>承接你的疑问。</b> 你在动手题里遇到了 <code>A E C 666 B</code> 的诡异顺序——这正是深入事件循环的最好契机。
+  搞懂这套机制，你以后写 LinkPulse 的异步代码（查库、调外部 API、后台聚合）时，才能<strong>准确预判执行时序</strong>，不被「为什么这段先跑」坑到。
+</div>
+
+<h2><span class="n">1</span>调用栈（Call Stack）</h2>
+<p>
+  调用栈是 JS 引擎里记录「<strong>此刻正在执行哪个函数</strong>」的一叠盒子，遵循<strong>后进先出（LIFO）</strong>：
+  调用一个函数就把它<strong>压入</strong>栈顶，函数返回就<strong>弹出</strong>。
+</p>
+<div class="fig">
+  <div class="callstack">
+    <div class="frame top">console.log('A')　← 栈顶，正在执行</div>
+    <div class="frame">main()　← 主脚本</div>
+  </div>
+  <div class="cap">图 1：调用栈是 LIFO。因为 JS 是<strong>单线程</strong>，所以全程只有<strong>一个</strong>调用栈。</div>
+</div>
+<p class="note">
+  🔑 <b>最关键的一条规则：</b>只有当<strong>调用栈空了</strong>（同步代码全跑完），事件循环才会去各个队列里取回调来执行。
+  这就是为什么<strong>任何异步回调都得排队等同步代码先跑完</strong>——也是上节课 A、E 总在最前面的原因<sup><a href="#c1">1</a></sup>。
+</p>
+
+<h2><span class="n">2</span>这些队列，到底存在哪？</h2>
+<p>
+  你问得很好：「微任务队列存在哪？」答案是——<strong>它们不在你的代码里，而是运行时内部的数据结构</strong>，由运行时的不同部分各自管理：
+</p>
+<div class="fig">
+  <div class="runtime">
+    <div class="rt-title">Node.js 运行时（一个进程 · 一个主线程）</div>
+    <div class="layer v8">
+      <b>🟦 V8 引擎（执行 JS）</b>
+      <div class="slot">调用栈 Call Stack</div>
+      <div class="slot">Promise 微任务队列（microtask queue）</div>
+    </div>
+    <div class="layer node">
+      <b>🟪 Node 核心</b>
+      <div class="slot">process.nextTick 队列（优先级最高）</div>
+    </div>
+    <div class="layer libuv">
+      <b>🟩 libuv（C 库 · 事件循环）</b>
+      <div class="slot">各阶段的宏任务队列：timers / poll / check …</div>
+    </div>
+  </div>
+  <div class="cap">
+    图 2：<strong>Promise 微任务队列</strong>由 V8 管理；<strong>nextTick 队列</strong>由 Node 核心管理；
+    <strong>定时器 / I/O 等宏任务队列</strong>由 libuv 管理<sup><a href="#c2">2</a></sup>。它们都是内存里的内部结构，你只是往里「塞回调」。
+  </div>
+</div>
+
+<h2><span class="n">3</span>事件循环的 6 个阶段</h2>
+<p>
+  当同步代码跑完、调用栈空了，libuv 的事件循环就开始<strong>一轮一轮（tick）地转</strong>，每轮按固定顺序经过 6 个阶段，每个阶段有自己的回调队列<sup><a href="#c3">3</a></sup>：
+</p>
+<div class="fig">
+  <ol class="phases">
+    <li><b>① timers</b>　执行到期的 <code>setTimeout</code> / <code>setInterval</code> 回调</li>
+    <li><b>② pending callbacks</b>　执行少数被延迟到本轮的系统 I/O 回调</li>
+    <li><b>③ idle, prepare</b>　仅 Node 内部使用</li>
+    <li class="hot"><b>④ poll</b>　取回新的 I/O 事件、执行<strong>绝大多数 I/O 回调</strong>（读文件/网络完成等）；必要时会在此<strong>阻塞等待</strong></li>
+    <li><b>⑤ check</b>　执行 <code>setImmediate()</code> 的回调</li>
+    <li><b>⑥ close callbacks</b>　执行关闭类回调，如 <code>socket.on('close', …)</code></li>
+    <li class="loopback">↻ 回到 ①，进入下一轮 tick</li>
+  </ol>
+  <div class="cap">
+    图 3：6 个阶段按序轮转。<strong>重点：每执行完一个回调、每次切换阶段之间，都会先把 nextTick 队列清空，再把 Promise 微任务队列清空</strong>——这就是微任务「插队」的原理<sup><a href="#c3">3</a></sup>。
+    阶段 4（poll）是后端最常打交道的，你查数据库的回调通常在这里被执行。
+  </div>
+</div>
+
+<h2><span class="n">4</span>互动追踪：把你的 <code>A E C 666 B</code> 走一遍</h2>
+<p>点「下一步」，看每一步里调用栈和各队列怎么变化、什么时候打印——尤其留意 <strong>⭐ 那一步</strong>，它就是你困惑的根源。</p>
+
+<div class="stepper" id="stepper">
+  <pre class="code"><span class="cl" data-line="1">console.log('A')</span>
+<span class="cl" data-line="2">setTimeout(() =&gt; console.log('B'), 0)</span>
+<span class="cl" data-line="3">Promise.resolve().then(() =&gt; console.log('C'))</span>
+<span class="cl" data-line="4">process.nextTick(() =&gt; Promise.resolve().then(() =&gt; console.log('666')))</span>
+<span class="cl" data-line="5">console.log('E')</span></pre>
+
+  <div class="phase-label" id="phaseLabel"></div>
+  <div class="lanes">
+    <div class="lane"><h4>📚 调用栈</h4><div class="chips" id="lane-stack"></div></div>
+    <div class="lane"><h4>🟪 nextTick 队列</h4><div class="chips" id="lane-nt"></div></div>
+    <div class="lane"><h4>🟦 Promise 微任务队列</h4><div class="chips" id="lane-pm"></div></div>
+    <div class="lane"><h4>🟩 定时器队列（宏任务）</h4><div class="chips" id="lane-tm"></div></div>
+  </div>
+  <div class="console"><span class="lbl">控制台输出</span><span id="consoleOut"></span></div>
+  <div class="desc" id="stepDesc"></div>
+  <div class="controls">
+    <button id="btnPrev">◀ 上一步</button>
+    <button id="btnNext">下一步 ▶</button>
+    <button id="btnReset">↺ 重置</button>
+    <span class="stepcount" id="stepCount"></span>
+  </div>
+</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 巩固一下 <span class="pill">对照</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">如果把第 4 行改成 <code>process.nextTick(() =&gt; console.log('D'))</code>（<strong>直接打印</strong>，不再套 Promise），输出会变成？</p>
+  <button class="opt" data-correct="true"  data-ex="对！这时 nextTick 回调自己就是打印动作，而 nextTick 优先级高于 Promise，所以 D 在 C 之前：A E D C B。">A → E → D → C → B</button>
+  <button class="opt" data-correct="false" data-ex="这是原来套了 Promise 的结果。现在 D 是直接打印、不再经过 Promise 队列，会更早出现。">A → E → C → 666 → B</button>
+  <button class="opt" data-correct="false" data-ex="C 是 Promise 微任务，D 在 nextTick 队列里、优先级更高，D 应该在 C 之前。">A → E → C → D → B</button>
+  <button class="opt" data-correct="false" data-ex="setTimeout(B) 是宏任务，必须等所有同步代码和微任务跑完，不可能排在中间。">A → B → D → C → E</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="src">
+  📖 <strong>本课首选精读源</strong>：
+  <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick" target="_blank" rel="noopener">Node.js 官方 — Event Loop, Timers, and process.nextTick()</a>
+  （事件循环 6 阶段、nextTick 的时机）；想要直观图文可看
+  <a href="https://javascript.info/event-loop" target="_blank" rel="noopener">javascript.info — Event loop</a>。
+</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑完互动动画后，做个小检验：</b>不看课件，向我口述一遍「为什么是 A E C 666 B」。
+  说得出来，我们就解锁 <strong>Lesson 0003：用原生 <code>http</code> 写你的第一个服务器</strong>；
+  说不顺，告诉我卡在哪一步，我换个角度再讲。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model" target="_blank" rel="noopener">MDN — JavaScript execution model</a>（调用栈、单线程、运行到完成）</li>
+    <li id="c2"><a href="https://developer.mozilla.org/en-US/docs/Web/API/HTML_DOM_API/Microtask_guide/In_depth" target="_blank" rel="noopener">MDN — In depth: Microtasks and the JavaScript runtime environment</a>（微任务队列由引擎管理）</li>
+    <li id="c3"><a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick" target="_blank" rel="noopener">Node.js 官方 — The Node.js Event Loop, Timers, and process.nextTick()</a>（6 个阶段；阶段间清空微任务）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0002 · 上一课 <a href="0001-node-runtime-and-execution-order.html">0001 — Node 的本质与执行顺序</a> · 下一课（预告）：<em>0003 — 你的第一个 HTTP 服务器</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+<script>
+/* 逐步追踪动画：A E C 666 B */
+(function () {
+  var S = [
+    {line:null, phase:"准备执行主脚本（同步）", stack:[], nt:[], pm:[], tm:[], out:"", desc:"主脚本即将开始。调用栈和所有队列都是空的。"},
+    {line:1, phase:"① 同步执行", stack:["console.log('A')"], nt:[], pm:[], tm:[], out:"A", desc:"第 1 行：console.log('A') 被压入调用栈、直接打印 A，然后弹出。"},
+    {line:2, phase:"① 同步执行", stack:["setTimeout(…)"], nt:[], pm:[], tm:["cb_B → log('B')"], out:"A", desc:"第 2 行：setTimeout 把 cb_B 注册到【定时器队列】（宏任务）。本身不打印。"},
+    {line:3, phase:"① 同步执行", stack:["Promise.then(…)"], nt:[], pm:["cb_C → log('C')"], tm:["cb_B → log('B')"], out:"A", desc:"第 3 行：Promise 已 resolved，把 cb_C 放进【Promise 微任务队列】。本身不打印。"},
+    {line:4, phase:"① 同步执行", stack:["process.nextTick(…)"], nt:["cb_NT → 安排新Promise"], pm:["cb_C → log('C')"], tm:["cb_B → log('B')"], out:"A", desc:"第 4 行：把 cb_NT 放进【nextTick 队列】。注意 cb_NT 的内容是『再安排一个 Promise』，不是直接打印。"},
+    {line:5, phase:"① 同步执行", stack:["console.log('E')"], nt:["cb_NT"], pm:["cb_C"], tm:["cb_B"], out:"A E", desc:"第 5 行：打印 E。至此同步代码全部结束，调用栈即将清空。"},
+    {line:null, phase:"② 清空微任务 · 先清 nextTick", stack:[], nt:["cb_NT"], pm:["cb_C"], tm:["cb_B"], out:"A E", desc:"调用栈空了！事件循环继续之前，先清【nextTick 队列】（优先级最高）。"},
+    {line:null, phase:"② 清空微任务 · 先清 nextTick", stack:["cb_NT 运行中"], nt:[], pm:["cb_C","cb_666 → log('666')"], tm:["cb_B"], out:"A E", key:true, desc:"⭐你困惑的根源：cb_NT 执行了——但它只是把 cb_666『安排』进【Promise 队列】的末尾（cb_C 已经排在前面）。cb_NT 自己什么都不打印！"},
+    {line:null, phase:"③ 清空微任务 · 再清 Promise", stack:["cb_C 运行中"], nt:[], pm:["cb_666"], tm:["cb_B"], out:"A E C", desc:"nextTick 队列空了 → 清【Promise 微任务队列】，FIFO 先进先出：先跑 cb_C，打印 C。"},
+    {line:null, phase:"③ 清空微任务 · 再清 Promise", stack:["cb_666 运行中"], nt:[], pm:[], tm:["cb_B"], out:"A E C 666", desc:"再跑 cb_666，打印 666。它虽是 nextTick『安排』的，但身份是普通 Promise 微任务，所以排在 cb_C 之后。"},
+    {line:null, phase:"④ 宏任务 · timers 阶段", stack:["cb_B 运行中"], nt:[], pm:[], tm:[], out:"A E C 666 B", desc:"微任务全清空 → 事件循环进入 timers 阶段，执行到期的 setTimeout 回调 cb_B，打印 B。"},
+    {line:null, phase:"✅ 完成", stack:[], nt:[], pm:[], tm:[], out:"A E C 666 B", desc:"所有队列清空。最终输出：A E C 666 B。"}
+  ];
+  var i = 0;
+  function chips(arr){
+    if(!arr.length) return '<span class="empty">（空）</span>';
+    return arr.map(function(x){
+      return '<span class="chip'+(/运行中/.test(x)?' running':'')+'">'+x+'</span>';
+    }).join('');
+  }
+  function $(id){ return document.getElementById(id); }
+  function render(){
+    var s = S[i];
+    document.querySelectorAll('.cl').forEach(function(el){
+      el.classList.toggle('hl', String(s.line) === el.getAttribute('data-line'));
+    });
+    $('phaseLabel').textContent = s.phase;
+    $('lane-stack').innerHTML = chips(s.stack);
+    $('lane-nt').innerHTML = chips(s.nt);
+    $('lane-pm').innerHTML = chips(s.pm);
+    $('lane-tm').innerHTML = chips(s.tm);
+    $('consoleOut').textContent = s.out || '（暂无）';
+    var d = $('stepDesc');
+    d.textContent = s.desc;
+    d.className = 'desc' + (s.key ? ' key' : '');
+    $('stepCount').textContent = '步骤 ' + i + ' / ' + (S.length - 1);
+    $('btnPrev').disabled = (i === 0);
+    $('btnNext').disabled = (i === S.length - 1);
+  }
+  $('btnNext').onclick = function(){ if(i < S.length-1){ i++; render(); } };
+  $('btnPrev').onclick = function(){ if(i > 0){ i--; render(); } };
+  $('btnReset').onclick = function(){ i = 0; render(); };
+  render();
+})();
+</script>
+
+</body>
+</html>

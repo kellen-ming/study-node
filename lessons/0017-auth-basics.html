@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0017 · 认证基础：注册、登录、密码哈希与 JWT</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：认证流程时序图 */
+.flow{border:1px solid #2a3b4d;border-radius:10px;padding:1rem 1.2rem;margin:1rem 0;background:#0e1722;font-size:.92rem;line-height:1.9}
+.flow .step{display:flex;gap:.6rem;align-items:flex-start}
+.flow .num{flex:0 0 1.5rem;height:1.5rem;border-radius:50%;background:#1e6f5c;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:700}
+.flow .arrow{color:#5a7a8c;margin:.1rem 0 .1rem 2.1rem}
+.tag{display:inline-block;font-size:.72rem;padding:.05rem .45rem;border-radius:5px;background:#243447;color:#9fd3c7;margin-left:.3rem;vertical-align:middle}
+.tag.warn{background:#4d2a2a;color:#e8a0a0}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0017 / 阶段 4</span></nav>
+<div class="kicker">Lesson 0017 · Node.js 后端之路</div>
+<h1>认证基础：注册、登录、密码哈希与 JWT</h1>
+
+<div class="mission">
+<b>为什么学这个？</b> 到目前为止，LinkPulse 的任何短链都是「公共」的——谁都能创建、谁都能调你的接口。可一旦它要收费上线，第一个绕不开的问题就是：<b>「这个请求背后到底是谁？」</b> 本章给 LinkPulse 装上「门」——实现 <code>POST /api/auth/register</code> 与 <code>POST /api/auth/login</code>：用户用 email + 密码注册，密码经过<b>不可逆哈希</b>后落到我们已有的 <code>users.password_hash</code> 字段；登录成功后签发一张 <b>JWT 令牌</b>，让后续请求能证明「我就是刚才那个人」。这是后面「我的短链列表」「按 plan 计费」「权限控制」的地基。
+</div>
+
+<h2><span class="n">1</span>认证 vs 授权：先分清「你是谁」和「你能干啥」</h2>
+<p>这两个词在中文里都带「权」，新手极易混淆，但它们是<b>两件先后发生的事</b>：</p>
+<ul>
+<li><b>认证（Authentication，简称 authn）</b>——「<b>你是谁？</b>」。系统确认请求背后的身份。登录就是认证：你出示 email + 密码，系统说「OK，你确实是 alice@x.com」。</li>
+<li><b>授权（Authorization，简称 authz）</b>——「<b>你能干啥？</b>」。在已知你是谁的前提下，判断你<b>有没有权限</b>做这件事。比如「免费用户每月最多建 50 条短链」「你只能删自己的短链」就是授权。</li>
+</ul>
+<p><b>类比：</b> 进公司大楼。门口刷工卡确认「你是张三」= 认证；张三的工卡只能开 3 楼的门、开不了机房 = 授权。<b>先认证、后授权</b>，顺序不能反——不知道你是谁，就无从谈你能干啥。</p>
+<div class="note">本章只做<b>认证</b>（注册 + 登录 + 签发令牌）。下一课 0018 才做<b>授权</b>（用中间件校验令牌、按 plan 限流、资源归属判断）。把它们拆成两章，正是因为它们是两个独立的关注点。</div>
+<p>作为前端，你早就天天和这两者打交道：调登录接口拿 token（认证的结果）、根据后端返回的角色字段决定按钮显隐（授权的体现）。区别在于——<b>在后端，这两件事都必须由服务端权威地做，前端的任何判断都只是 UI 体验，不能当安全边界。</b></p>
+
+<h2><span class="n">2</span>密码为什么绝不能明文存——哈希 + 加盐</h2>
+<p>设想 LinkPulse 数据库被拖库（database breach，被攻击者导出整张表）。如果 <code>password_hash</code> 里存的是明文 <code>"hunter2"</code>，攻击者立刻拿到所有人的密码——而且很多人会在别的网站复用同一个密码，灾难会蔓延到用户的邮箱、银行。所以行业铁律：<b>服务端永远不应该「知道」用户的明文密码，连数据库管理员也不该。</b></p>
+
+<h3>什么是哈希（hash）？</h3>
+<p><b>哈希函数</b>是一种<b>单向</b>运算：输入任意数据，输出一段固定长度的「指纹」。它的关键性质是<b>不可逆</b>——从指纹算不回原文。</p>
+<p><b>类比：</b> 把一块牛排煎熟。煎熟容易（哈希），但你没法把熟牛排还原成生牛排（不可逆）。登录时我们不需要「还原」，只要把用户这次输入的密码<b>再煎一次</b>，比较两块「熟牛排」是否一样即可。</p>
+
+<h3>为什么还要「加盐」（salt）？</h3>
+<p>光哈希不够。两个用户若用了相同密码，纯哈希会得到<b>相同</b>的指纹；攻击者还能预先算好海量「常见密码 → 哈希」对照表（<b>彩虹表 / rainbow table</b>），拖库后一查就破。</p>
+<p><b>盐</b>是为每个用户随机生成的一段数据，哈希前混进密码里。这样：① 相同密码的两个用户，指纹也不同；② 彩虹表失效，因为攻击者得为<b>每个盐</b>单独重算，成本与用户数成正比<sup><a href="#c1">1</a></sup>。OWASP 明确：必须为每个密码加<b>唯一</b>的盐。</p>
+
+<h3>为什么要用「慢」的算法？</h3>
+<p>MD5、SHA-256 这类是<b>通用快速</b>哈希，为大文件校验设计——一秒能算几十亿次，对密码反而是灾难：攻击者拖库后可以暴力穷举。密码必须用<b>专门的、故意很慢的</b>算法，并带可调的「工作因子」（work factor），让单次哈希耗时几十到几百毫秒。对正常登录无感，对暴力破解则是天文级成本<sup><a href="#c1">1</a></sup>。</p>
+
+<div class="rw">🌍 <b>实战：别自己造密码哈希。</b> OWASP《Password Storage Cheat Sheet》给出的标准选择是：<b>首选 Argon2id</b>（内存硬，抗 GPU/ASIC，2015 密码哈希竞赛冠军），参数基线 <code>m=19456 (19 MiB), t=2, p=1</code>；<b>次选 bcrypt</b>（成熟、库多、够用），工作因子（cost / saltRounds）<b>最少 10</b>，生产常用 12<sup><a href="#c1">1</a></sup>。绝对不要用 MD5/SHA1/SHA256「裸哈希」存密码，更不要自己拼盐写算法——密码学自研几乎必翻车。本课用 <code>bcrypt</code>（npm 上最常见、装起来最省心），理解了原理后切 argon2 只是换个库。</div>
+
+<div class="cmp">
+<div><h4>❌ 错误：明文 / 裸 SHA256</h4>
+<pre><code>// 拖库即裸奔
+user.password = "hunter2";
+// 或者：快速哈希、无盐、可被彩虹表秒破
+user.password_hash =
+  sha256("hunter2");</code></pre></div>
+<div><h4>✅ 正确：bcrypt（盐已内嵌进结果）</h4>
+<pre><code>// $2b$12$N9qo...salt...hash
+// 段含：算法 / cost / 盐 / 哈希
+user.password_hash =
+  await bcrypt.hash("hunter2", 12);</code></pre></div>
+</div>
+<p>注意上面右边那串：bcrypt 把<b>算法版本、cost、盐、最终哈希全打包进一个字符串</b>，所以你<b>不用</b>在数据库单独存盐——登录比对时 bcrypt 会从这串里把盐读出来重算<sup><a href="#c4">4</a></sup>。这也是 <code>users</code> 表只有一个 <code>password_hash</code> 字段就够用的原因。</p>
+
+<div class="note"><b>bcrypt 的 72 字节坑：</b> bcrypt 只取输入的<b>前 72 字节</b>，超出部分被静默忽略。注意是<b>字节</b>不是字符——一串含 emoji 的 UTF-8 密码可能不到 72 字符却超 72 字节<sup><a href="#c4">4</a></sup>。所以 OWASP 建议把密码长度上限设到 72 字节（或对超长密码先做一次 HMAC 预哈希）<sup><a href="#c1">1</a></sup>。我们在 zod 校验里直接限制长度即可。</p></div>
+
+<h2><span class="n">3</span>注册流程：zod 校验 → 哈希 → 落库</h2>
+<p>注册做三件事，每一步都对应一个你已经掌握的工具：</p>
+<div class="flow">
+<div class="step"><span class="num">1</span><div><b>校验输入</b> <span class="tag">zod</span>—— email 格式合法、密码长度达标（≥8、≤72 字节）。脏数据挡在门外。</div></div>
+<div class="arrow">↓</div>
+<div class="step"><span class="num">2</span><div><b>查重</b> <span class="tag">Prisma</span>—— 该 email 是否已注册。<span class="tag warn">注意防枚举，见下</span></div></div>
+<div class="arrow">↓</div>
+<div class="step"><span class="num">3</span><div><b>哈希密码</b> <span class="tag">bcrypt</span>—— <code>await bcrypt.hash(password, 12)</code>，得到 <code>password_hash</code>。</div></div>
+<div class="arrow">↓</div>
+<div class="step"><span class="num">4</span><div><b>写 users 表</b> <span class="tag">Prisma</span>—— 存 email + password_hash + plan（默认 free）。<b>返回时绝不带 password_hash。</b></div></div>
+</div>
+
+<p>先定义 zod schema 和密码工具模块。沿用我们已有的分层（route → controller → service）。</p>
+<pre><code>// src/modules/auth/auth.schema.ts
+import { z } from "zod";
+
+export const registerSchema = z.object({
+  email: z.string().email("邮箱格式不正确"),
+  // 下限 8 防弱密码；上限 72 对齐 bcrypt 字节上限
+  password: z.string().min(8, "密码至少 8 位").max(72, "密码过长"),
+});
+export const loginSchema = registerSchema; // 登录字段相同
+
+export type RegisterInput = z.infer&lt;typeof registerSchema&gt;;
+export type LoginInput = z.infer&lt;typeof loginSchema&gt;;</code></pre>
+
+<pre><code>// src/lib/password.ts —— 把 bcrypt 封一层，全项目统一用
+import bcrypt from "bcrypt";
+
+const SALT_ROUNDS = 12; // OWASP 最少 10，生产常用 12
+
+export function hashPassword(plain: string): Promise&lt;string&gt; {
+  return bcrypt.hash(plain, SALT_ROUNDS);
+}
+
+export function verifyPassword(
+  plain: string,
+  hash: string,
+): Promise&lt;boolean&gt; {
+  return bcrypt.compare(plain, hash); // 内部读出盐与 cost 重算后比对
+}</code></pre>
+
+<pre><code>// src/modules/auth/auth.service.ts
+import { prisma } from "../../lib/prisma.js";
+import { hashPassword } from "../../lib/password.js";
+import type { RegisterInput } from "./auth.schema.js";
+
+// 自定义错误，让 controller 能区分「邮箱已占用」
+export class EmailTakenError extends Error {}
+
+export async function registerUser(input: RegisterInput) {
+  const existing = await prisma.user.findUnique({
+    where: { email: input.email },
+  });
+  if (existing) throw new EmailTakenError();
+
+  const passwordHash = await hashPassword(input.password);
+
+  const user = await prisma.user.create({
+    data: {
+      email: input.email,
+      password_hash: passwordHash, // 存哈希，永不存明文
+      plan: "free",
+    },
+    // 只选安全字段，从源头杜绝 hash 泄露
+    select: { id: true, email: true, plan: true, created_at: true },
+  });
+  return user;
+}</code></pre>
+<div class="note"><b>为什么用 <code>select</code> 显式挑字段？</b> Prisma 默认返回整行，包括 <code>password_hash</code>。哪怕你只是疏忽地 <code>res.json(user)</code>，哈希就泄露了。<b>在最底层（service/查询）就把敏感字段排除</b>，比在每个出口处「记得删掉」更可靠——这叫「安全默认值（secure by default）」。</div>
+
+<h2><span class="n">4</span>登录流程：查用户 → 比对哈希（并防用户枚举）</h2>
+<p>登录是注册的镜像：<b>用同样的算法把这次输入的密码再哈希一遍，和库里的比</b>——但我们从不解密，而是用 <code>bcrypt.compare</code> 让它内部完成「取盐重算再比」。</p>
+
+<div class="rw">🌍 <b>实战：登录失败别告诉用户「是邮箱错还是密码错」。</b> 如果邮箱不存在返回「用户不存在」、密码错返回「密码错误」，攻击者就能拿一堆邮箱来「探」哪些已注册——这叫<b>用户枚举（user enumeration）</b>，是注册/登录/找回密码接口的经典漏洞。正确做法：两种情况都返回同一句模糊提示，如「邮箱或密码错误」，HTTP 状态统一 <code>401</code>。</div>
+
+<div class="note"><b>进阶：时序攻击（timing attack）。</b> 若邮箱不存在就直接返回，响应会比「邮箱存在但密码错」（要跑一次 bcrypt）<b>快</b>，攻击者能借响应时间差推断邮箱是否注册。严谨做法是：即使没查到用户，也对一个「假哈希」跑一次 <code>bcrypt.compare</code>，让两条路径耗时相近。本课先理解概念，下面代码给出注释位置。</div>
+
+<pre><code>// src/modules/auth/auth.service.ts （续）
+import { verifyPassword } from "../../lib/password.js";
+import type { LoginInput } from "./auth.schema.js";
+
+export class InvalidCredentialsError extends Error {}
+
+export async function loginUser(input: LoginInput) {
+  const user = await prisma.user.findUnique({
+    where: { email: input.email },
+  });
+
+  // 防枚举：邮箱不存在 与 密码错误，对外是同一种结果
+  if (!user) {
+    // 进阶（抗时序）：此处也跑一次假比对，凑齐耗时
+    // await verifyPassword(input.password, DUMMY_HASH);
+    throw new InvalidCredentialsError();
+  }
+
+  const ok = await verifyPassword(input.password, user.password_hash);
+  if (!ok) throw new InvalidCredentialsError();
+
+  // 校验通过：返回安全字段（绝不含 password_hash）
+  return { id: user.id, email: user.email, plan: user.plan };
+}</code></pre>
+
+<h2><span class="n">5</span>登录之后怎么「记住」你：Session vs JWT</h2>
+<p>HTTP 是<b>无状态</b>的——每个请求都是「初次见面」，服务器默认不记得你上一个请求是谁。那登录成功后，怎么让接下来的请求（建短链、看列表）都知道「这是 alice」？两条主流路线：</p>
+
+<div class="cmp">
+<div><h4>Session（服务端有状态）</h4>
+<p style="font-size:.88rem">登录后服务端生成一个 <b>session id</b>，把「这个 id 对应 alice」存在服务端（内存/Redis/库）。浏览器拿着 id（通常放 cookie），每次请求带上，服务端拿 id 去<b>查</b>是谁。</p>
+<p style="font-size:.88rem">✅ 能<b>随时吊销</b>（删服务端记录即登出）<br>❌ 服务端要<b>存状态</b>，多实例需共享存储（如 Redis）</p></div>
+<div><h4>JWT（无状态令牌）</h4>
+<p style="font-size:.88rem">登录后服务端签发一张 <b>JWT</b>，把「我是 alice」直接<b>写进令牌</b>并用密钥<b>签名</b>。之后服务端只<b>验签名</b>就知道是谁，<b>无需查库</b>。</p>
+<p style="font-size:.88rem">✅ <b>无状态</b>、易水平扩展、跨服务通用<br>❌ 签出去就难<b>主动吊销</b>，只能等它过期</p></div>
+</div>
+
+<h3>JWT 到底长啥样？</h3>
+<p>JWT（JSON Web Token，RFC 7519）是三段 Base64URL 用 <code>.</code> 连接的字符串：<code>header.payload.signature</code><sup><a href="#c2">2</a></sup>。</p>
+<ul>
+<li><b>Header</b>：声明算法，如 <code>{"alg":"HS256","typ":"JWT"}</code>。</li>
+<li><b>Payload（载荷）</b>：放<b>声明（claims）</b>，如 <code>sub</code>（subject，主体，常放 userId）、<code>exp</code>（过期时间）、自定义字段如 <code>plan</code>。<b>注意：payload 只是 Base64 编码，不是加密，任何人都能解开看！绝不能放密码、敏感信息。</b><sup><a href="#c2">2</a></sup></li>
+<li><b>Signature（签名）</b>：用<b>服务端密钥</b>对前两段签名。改一个字符签名就对不上——这保证令牌<b>没被篡改</b>，且确实是我们签的。</li>
+</ul>
+<p><b>类比：</b> JWT 像演唱会的<b>防伪门票</b>。票面写着座位号（claims，公开可见），但带防伪水印（签名）。检票员不用打电话回票务中心查（不查库），看一眼水印真假就放行。缺点也在此：票一旦印出去，散场前你很难「作废某一张」。</p>
+
+<div class="rw">🌍 <b>实战：access token + refresh token。</b> 因为 JWT 难吊销，业界通常签<b>两张</b>：① <b>access token</b>，寿命很短（15 分钟），带在每个请求里，被偷了损失也有限；② <b>refresh token</b>，寿命长（数天/周），存在服务端可记录、可吊销，只用来「换发」新的 access token。本课先实现单张 access token 跑通登录，<b>refresh token 留到讲会话续期时再加</b>——先建立心智模型。</div>
+
+<h2><span class="n">6</span>给 LinkPulse 签发 JWT</h2>
+<p>用 <code>jsonwebtoken</code> 签发。<b>密钥必须放 .env</b>，绝不能硬编码进代码——密钥一旦泄露，攻击者就能伪造任意人的令牌。</p>
+
+<div class="rw">🌍 <b>实战：JWT 密钥进 .env，且要足够强。</b> HS256 用的是对称密钥，太短易被暴力破解。生成一串高熵随机串：<code>openssl rand -base64 48</code>，写进 <code>.env</code> 的 <code>JWT_SECRET</code>，并确保 <code>.env</code> 在 <code>.gitignore</code> 里（你前面已配好 dotenv / <code>--env-file</code>）。不同环境用不同密钥。</div>
+
+<pre><code>// src/lib/jwt.ts
+import jwt from "jsonwebtoken";
+
+const SECRET = process.env.JWT_SECRET;
+if (!SECRET) throw new Error("缺少环境变量 JWT_SECRET"); // 启动即失败，胜过运行时才炸
+
+// 我们要塞进令牌的业务字段
+export interface JwtPayload {
+  sub: string;   // 用户 id（RFC 7519 标准声明 subject）
+  plan: string;  // 计费档位，授权时会用到
+}
+
+export function signAccessToken(payload: JwtPayload): string {
+  return jwt.sign(payload, SECRET, {
+    expiresIn: "15m",        // 短寿命，降低泄露风险
+    issuer: "linkpulse",     // iss：签发方，便于多服务校验
+  });
+}
+
+export function verifyAccessToken(token: string): JwtPayload {
+  // verify 验签 + 验过期；失败抛错，由调用方处理
+  return jwt.verify(token, SECRET) as JwtPayload;
+}</code></pre>
+<div class="note"><code>expiresIn</code> 接受秒数或时间串（<code>"15m"</code>、<code>"1h"</code>、<code>"7d"</code>）；它会自动写入标准的 <code>exp</code> 声明，<code>jwt.verify</code> 校验时若已过期会抛 <code>TokenExpiredError</code><sup><a href="#c3">3</a></sup>。<code>verify</code>（验签）这一步本章只在「签发后立即验证跑通」时用；真正用它做<b>请求拦截</b>是下一课 0018 的认证中间件。</div>
+
+<p>串起 controller（衔接你已有的 zod 校验中间件与 4 参数错误处理风格）：</p>
+<pre><code>// src/modules/auth/auth.controller.ts
+import type { Request, Response, NextFunction } from "express";
+import { registerSchema, loginSchema } from "./auth.schema.js";
+import {
+  registerUser, loginUser,
+  EmailTakenError, InvalidCredentialsError,
+} from "./auth.service.js";
+import { signAccessToken } from "../../lib/jwt.js";
+
+export async function register(req: Request, res: Response, next: NextFunction) {
+  try {
+    const input = registerSchema.parse(req.body); // 校验 + 类型收窄
+    const user = await registerUser(input);
+    res.status(201).json({ user }); // 201 Created；不下发 token，让其显式登录
+  } catch (err) {
+    if (err instanceof EmailTakenError) {
+      // 注册接口可以明确提示邮箱占用（这是注册必要的反馈）
+      return res.status(409).json({ error: "该邮箱已被注册" });
+    }
+    next(err); // 其余交给全局错误中间件（含 zod 校验错误）
+  }
+}
+
+export async function login(req: Request, res: Response, next: NextFunction) {
+  try {
+    const input = loginSchema.parse(req.body);
+    const user = await loginUser(input);
+    const token = signAccessToken({ sub: user.id, plan: user.plan });
+    res.json({ token, user });
+  } catch (err) {
+    if (err instanceof InvalidCredentialsError) {
+      // 防枚举：邮箱不存在 / 密码错，统一这一句、统一 401
+      return res.status(401).json({ error: "邮箱或密码错误" });
+    }
+    next(err);
+  }
+}</code></pre>
+
+<pre><code>// src/modules/auth/auth.routes.ts
+import { Router } from "express";
+import { register, login } from "./auth.controller.js";
+
+export const authRouter = Router();
+authRouter.post("/register", register);
+authRouter.post("/login", login);
+
+// src/app.ts 里挂载：
+// app.use("/api/auth", authRouter);</code></pre>
+
+<div class="rw">🌍 <b>实战：token 该放客户端哪里？</b> 登录返回 token 后，前端有两种存法，各有安全权衡：<br>① <b>localStorage</b>——读写方便，但任何 XSS（注入的 JS）都能读走它，风险高；<br>② <b>httpOnly cookie</b>——JS 读不到（防 XSS 偷 token），但需防 <b>CSRF</b>（配 <code>SameSite=Strict/Lax</code> + <code>Secure</code>）。<br>对要上线收费的 SaaS，<b>更稳的是 httpOnly + Secure + SameSite 的 cookie</b>。本课接口先把 token 放响应体返回（便于你用 curl/Postman 调试理解），cookie 下发与 CSRF 防护放到 0018 一起讲。</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">认证</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">登录接口里，当用户提交的邮箱在数据库中查不到时，下列哪种处理最稳妥？</p>
+  <button class="opt" data-correct="true" data-ex="对。返回与「密码错误」完全相同的模糊提示和 401，攻击者就无法借响应区分「邮箱是否已注册」，这正是防用户枚举的标准做法。">返回 401 与「邮箱或密码错误」，和密码错时完全一致</button>
+  <button class="opt" data-correct="false" data-ex="错。明确返回「该邮箱未注册」会泄露邮箱是否存在，攻击者可批量探测出已注册账号，构成用户枚举漏洞。">返回 404 与「该邮箱未注册」，提示用户去注册</button>
+  <button class="opt" data-correct="false" data-ex="错。把明文密码哈希后明文回传毫无意义，且哈希本就该留在服务端，绝不下发给客户端。">把输入密码哈希后返回，让前端自己比对</button>
+  <button class="opt" data-correct="false" data-ex="错。500 表示服务端异常，邮箱查不到是正常的业务结果不是错误；且仍未解决枚举问题。">返回 500，让前端统一当作服务器错误处理</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task"><h3>⌨️ 动手：给 LinkPulse 装上注册与登录</h3>
+<ol>
+<li>安装依赖：<code>npm i bcrypt jsonwebtoken</code> 与 <code>npm i -D @types/bcrypt @types/jsonwebtoken</code>。</li>
+<li>在 <code>.env</code> 里加 <code>JWT_SECRET</code>，值用 <code>openssl rand -base64 48</code> 生成；确认 <code>.env</code> 已被 <code>.gitignore</code> 忽略。</li>
+<li>新建 <code>src/lib/password.ts</code>、<code>src/lib/jwt.ts</code>，以及 <code>src/modules/auth/</code> 下的 schema / service / controller / routes，按本课代码实现。</li>
+<li>在 <code>app.ts</code> 挂载 <code>app.use("/api/auth", authRouter)</code>。</li>
+<li>用 curl 跑通：先 <code>POST /api/auth/register</code> 注册一个邮箱，去数据库确认 <code>password_hash</code> 是一串 <code>$2b$12$...</code> 而非明文；再 <code>POST /api/auth/login</code>，确认拿到 <code>token</code>。</li>
+<li>把拿到的 token 粘到 <a href="https://jwt.io" target="_blank" rel="noopener">jwt.io</a> 解一下，验证 payload 里能看到你的 <code>sub</code> 和 <code>plan</code>——亲眼确认「payload 不是加密、人人可读」。</li>
+<li>（加分）故意用错误密码登录、用不存在的邮箱登录，确认两者返回<b>完全相同</b>的 401 提示。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html" target="_blank" rel="noopener">OWASP Password Storage Cheat Sheet</a>——密码存储的行业权威标准，哈希算法选型与参数都以它为准。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> ① <code>register</code> 后数据库里 <code>password_hash</code> 字段的那串值（脱敏即可，让我看出是 bcrypt 格式）；② <code>login</code> 返回的 token，以及它在 jwt.io 上解出的 payload 截图。<br><strong>下一课预告：</strong> Lesson 0018《认证中间件与安全加固》——写一个 <code>requireAuth</code> 中间件用 <code>jwt.verify</code> 拦截受保护路由，把 token 改用 httpOnly cookie 下发并防 CSRF，再按 <code>plan</code> 做授权与限流，让「只有登录用户能建短链、只能管自己的短链」真正落地。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html" target="_blank" rel="noopener">OWASP Password Storage Cheat Sheet</a>（首选 Argon2id 参数 m=19456/t=2/p=1；bcrypt 工作因子最少 10、72 字节上限；必须每密码唯一加盐、用慢哈希）。</li>
+    <li id="c2"><a href="https://datatracker.ietf.org/doc/html/rfc7519" target="_blank" rel="noopener">RFC 7519 - JSON Web Token (JWT)</a> 与 <a href="https://jwt.io/introduction" target="_blank" rel="noopener">jwt.io Introduction</a>（JWT 三段结构 header.payload.signature，标准声明 sub/exp/iss，payload 仅编码非加密）。</li>
+    <li id="c3"><a href="https://www.npmjs.com/package/jsonwebtoken" target="_blank" rel="noopener">jsonwebtoken (npm)</a>（jwt.sign 的 expiresIn/issuer 选项、jwt.verify 验签与过期、TokenExpiredError）。</li>
+    <li id="c4"><a href="https://www.npmjs.com/package/bcrypt" target="_blank" rel="noopener">bcrypt (npm)</a>（hash/compare API、saltRounds 默认 10、盐内嵌进哈希结果、仅取前 72 字节且按字节计）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0017 · 上一课 <a href="0016-redirect-and-redis-cache.html">短链跳转与 Redis 缓存</a> · 下一课（预告）：<em>认证中间件与安全加固</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0024 · 用 Docker 容器化 LinkPulse</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：镜像分层 / 阶段示意 */
+.layers{display:flex;flex-direction:column;gap:.25rem;margin:1rem 0;font-size:.85rem}
+.layers .lyr{border:1px solid var(--border,#ccc);border-radius:6px;padding:.4rem .7rem;background:#f6f8fa}
+.layers .lyr.base{background:#eef6ff}
+.layers .lyr.app{background:#eafaf0}
+.stages{display:flex;gap:.8rem;flex-wrap:wrap;margin:1rem 0}
+.stages .stage{flex:1;min-width:220px;border:1px solid var(--border,#ccc);border-radius:8px;padding:.6rem .8rem}
+.stages .stage h4{margin:.2rem 0 .5rem}
+.stages .stage.build{background:#fff7e6}
+.stages .stage.run{background:#eafaf0}
+.size{font-family:ui-monospace,monospace;font-weight:700}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0024 / 阶段 7</span></nav>
+<div class="kicker">Lesson 0024 · Node.js 后端之路</div>
+<h1>用 Docker 容器化 LinkPulse</h1>
+
+<div class="mission"><b>为什么学这个？</b> 到现在为止，LinkPulse 在你本机能跑：Node 进程 + 本地装的 PostgreSQL + 本地装的 Redis。可一旦换台机器、换个同事、或者推到云服务器，就开始「我这跑得好好的啊」。本章把 LinkPulse <b>容器化</b>：写一个 <code>Dockerfile</code> 把 app 打包成可移植镜像，再用 <code>docker compose</code> 一条命令同时拉起 <b>app + postgres + redis</b> 整套全栈。这是下一课「CI/CD 与部署」的地基——能部署上线收费，第一步就是「能被打包成镜像」。</div>
+
+<h2><span class="n">1</span>为什么要容器化：消灭「在我机器上是好的」</h2>
+<p>你现在的运行环境其实是一堆<b>隐式依赖</b>：本机的 Node 版本、本机装的 Postgres 版本、Redis 是不是开着、<code>.env</code> 里那串连接串、甚至某个全局 npm 包。这些东西没有一个写在代码仓库里。换台机器，任何一项对不上，应用就崩——这就是经典的「<b>在我机器上是好的</b>」（works on my machine）。</p>
+
+<p><b>容器（container）</b>就是为了解决这个问题。它把「你的应用 + 运行它所需的一切（Node 运行时、依赖、系统库、环境配置）」打包成一个标准化的、隔离的运行单元。在哪台装了 Docker 的机器上跑，行为都一致。</p>
+
+<div class="note"><b>前端类比（快速复习）：</b>你熟悉 <code>npm pack</code> / 发布到 npm 的「锁版本」思路，或者 <code>vite build</code> 产出确定的 <code>dist/</code>。容器是把这个思路扩大到<b>整个操作系统层级</b>：不只锁住 JS 依赖，连 Node 版本、OS 库都一起锁进一个不可变的「快照」里。</p></div>
+
+<p>容器和虚拟机（VM）不同：VM 要模拟一整套硬件 + 跑一个完整 Guest OS，几个 GB、启动几十秒；容器<b>共享宿主机的 Linux 内核</b>，只打包应用层，几十到几百 MB、启动以秒计<sup><a href="#c1">1</a></sup>。这就是为什么容器能做到「一台机器塞几十个、秒级启停」，非常适合做后端服务和弹性扩缩。</p>
+
+<div class="rw">🌍 <b>实战：</b>团队协作里，容器化最直接的收益是「新人入职第二天就能跑起整个项目」。没有容器时，新同事要照着一份过时的 README 手装 Postgres、Redis、配环境变量，常常折腾半天。有了 <code>docker compose up</code>，一条命令把数据库、缓存、应用全拉起来，环境和你完全一致。这也是为什么几乎所有现代后端项目仓库根目录都有 <code>Dockerfile</code> 和 <code>compose.yaml</code>。</div>
+
+<h2><span class="n">2</span>镜像 vs 容器：模板与实例</h2>
+<p>这两个概念初学最容易混。一句话区分：</p>
+<ul>
+<li><b>镜像（image）</b>：只读的<b>模板/打包产物</b>。它是一层一层叠起来的文件系统快照（基础 OS 层 + Node 层 + 你的依赖层 + 你的代码层），加上启动命令等元数据。镜像是<b>静态</b>的，可以推到镜像仓库（registry）分发。</li>
+<li><b>容器（container）</b>：镜像<b>跑起来后的运行实例</b>。它是<b>动态</b>的——有自己的进程、可写的临时层、网络。一个镜像可以同时跑出多个容器。</li>
+</ul>
+
+<div class="note"><b>类比：</b>镜像 = 你写的 <code>class</code>（蓝图）；容器 = <code>new</code> 出来的实例。或者：镜像 = 一个安装好系统的 U 盘镜像文件；容器 = 用它启动出来的那台正在运行的「机器」。</div>
+
+<p>镜像由 <b>层（layer）</b>叠成，每条 Dockerfile 指令通常产生一层。层会被<b>缓存</b>：如果某一层和它之前的层都没变，Docker 直接复用缓存，不重新构建。这就是后面「指令顺序很重要」的原因。</p>
+
+<div class="layers">
+<div class="lyr base">layer 0 · 基础镜像 node:22-alpine（OS + Node 运行时）</div>
+<div class="lyr">layer 1 · COPY package*.json + npm ci（依赖，很少变 → 缓存命中率高）</div>
+<div class="lyr app">layer 2 · COPY 源码 + 编译产物（经常变 → 放最后）</div>
+</div>
+
+<h2><span class="n">3</span>写第一版 Dockerfile：把 LinkPulse 打包</h2>
+<p><code>Dockerfile</code> 是一份「怎么构建镜像」的脚本，放在项目根目录。我们先写一个<b>朴素单阶段</b>版本理解每条指令，再在第 4 节升级成多阶段。LinkPulse 是 TypeScript + ESM 项目，<code>npm run build</code> 把 <code>src/</code> 编译进 <code>dist/</code>，入口是 <code>dist/index.js</code>。</p>
+
+<pre><code># ── 朴素单阶段版（仅用于讲解，生产请看第 4 节多阶段版）──
+FROM node:22-alpine
+
+# 容器内的工作目录，后续相对路径都基于它
+WORKDIR /app
+
+# 先只拷依赖清单，利用层缓存：源码改了也不会触发重装依赖
+COPY package.json package-lock.json ./
+
+# npm ci 严格按 lock 文件安装，可复现，比 npm install 更适合构建
+RUN npm ci
+
+# 再拷其余源码（含 prisma/、tsconfig.json、src/）
+COPY . .
+
+# 生成 Prisma Client，再把 TS 编译成 dist/
+RUN npx prisma generate
+RUN npm run build
+
+# 文档化：应用监听 3000（EXPOSE 只是声明，不真正发布端口）
+EXPOSE 3000
+
+# 容器启动时执行的命令
+CMD ["node", "dist/index.js"]
+</code></pre>
+
+<p>逐条理解几个后端新概念：</p>
+<ul>
+<li><b><code>FROM node:22-alpine</code></b>：基础镜像。<code>node:22</code> 是官方 Node 镜像，<code>-alpine</code> 表示基于极小的 Alpine Linux（几 MB），相比默认的 Debian 版镜像小很多<sup><a href="#c2">2</a></sup>。</li>
+<li><b><code>WORKDIR /app</code></b>：设定容器里的当前目录，并自动创建它。后面的 <code>COPY . .</code> 第二个 <code>.</code> 就是指 <code>/app</code>。</li>
+<li><b>先 <code>COPY package*.json</code> 再 <code>npm ci</code>，最后才 <code>COPY . .</code></b>：这是<b>层缓存</b>的关键。Docker 官方建议「把最不常变的指令放前面」<sup><a href="#c2">2</a></sup>。依赖清单很少变，源码天天改；这样排，只改源码时 <code>npm ci</code> 那层直接命中缓存，构建快得多。</li>
+<li><b><code>npm ci</code> 而非 <code>npm install</code></b>：<code>ci</code> 严格依据 <code>package-lock.json</code> 安装、构建可复现，是 CI/容器构建的标准做法。</li>
+<li><b><code>CMD</code> 用数组（exec form）</b>：<code>["node","dist/index.js"]</code> 不经过 shell，进程是 PID 1，能正确收到 <code>SIGTERM</code> 优雅退出——这点在 K8s/容器编排下很重要。</li>
+</ul>
+
+<div class="note"><b>为什么要 <code>npx prisma generate</code>？</b> Prisma Client 是「按你的 schema 生成的代码」，不在 <code>node_modules</code> 里现成存在，必须在构建时生成一次，否则容器里 <code>import { PrismaClient }</code> 会报错。注意这只是生成 Client，不是连数据库；<code>prisma migrate</code> 要等容器运行、能连上 DB 时再做。</p></div>
+
+<h2><span class="n">4</span>多阶段构建 + .dockerignore：把镜像瘦下来</h2>
+<p>上面那版有个问题：最终镜像里塞着<b>全部 devDependencies</b>（TypeScript 编译器、类型包、测试框架……）和 <b>TS 源码</b>，而运行时只需要 <code>dist/</code> + 生产依赖。镜像越大，拉取越慢、攻击面越大。</p>
+
+<p><b>多阶段构建（multi-stage build）</b>是官方推荐的解法<sup><a href="#c2">2</a></sup>：在同一个 Dockerfile 里写多个 <code>FROM</code>，每个 <code>FROM</code> 是一个独立阶段。<b>build 阶段</b>装全部依赖、编译 TS；<b>最终阶段</b>从一个干净的小镜像起步，只用 <code>COPY --from=...</code> 把「编译产物 + 生产依赖」捞过来。中间阶段的临时文件全部丢弃，不进最终镜像。</p>
+
+<div class="stages">
+<div class="stage build"><h4>① builder 阶段</h4>装全部依赖（含 dev）→ <code>prisma generate</code> → <code>npm run build</code> 编出 <code>dist/</code>。这一层很大，但<b>不会进最终镜像</b>。</div>
+<div class="stage run"><h4>② runner 阶段</h4>干净小镜像，只拷 <code>dist/</code> + 生产依赖 + Prisma 产物。<span class="size">最终镜像可从 1GB+ 降到 ~150MB</span>。</div>
+</div>
+
+<p>下面是给 LinkPulse 的<b>生产级 Dockerfile</b>，请用它替换第 3 节那版：</p>
+
+<pre><code># ============ Stage 1: builder（编译 TS） ============
+FROM node:22-alpine AS builder
+WORKDIR /app
+
+# 缓存友好：先装依赖
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# 拷源码并构建
+COPY prisma ./prisma
+RUN npx prisma generate
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build      # 产出 dist/
+
+# 把 node_modules 收敛到只剩生产依赖，供下一阶段拷贝
+RUN npm prune --omit=dev
+
+# ============ Stage 2: runner（只留运行所需） ============
+FROM node:22-alpine AS runner
+WORKDIR /app
+
+# 生产环境标志：让依赖/框架走生产路径
+ENV NODE_ENV=production
+
+# 官方 node 镜像自带一个非 root 的 node 用户，直接用它
+# --chown 保证文件归 node 所有，避免权限问题
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/dist ./dist
+COPY --from=builder --chown=node:node /app/package.json ./package.json
+# Prisma 运行时需要 schema 与生成的 client（client 在 node_modules 里已带）
+COPY --from=builder --chown=node:node /app/prisma ./prisma
+
+# 切换到非 root 用户运行
+USER node
+
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+</code></pre>
+
+<p>配套的 <b><code>.dockerignore</code></b>（放项目根目录）告诉 Docker「构建时别把这些发给守护进程、别拷进镜像」。官方明确建议每个项目都加一个，能让构建更快、镜像更小<sup><a href="#c2">2</a></sup>：</p>
+
+<pre><code># .dockerignore
+node_modules
+dist
+npm-debug.log*
+.git
+.gitignore
+.env
+.env.*
+coverage
+*.md
+Dockerfile
+.dockerignore
+</code></pre>
+
+<div class="rw">🌍 <b>实战：</b><code>node_modules</code> 是 <code>.dockerignore</code> 里<b>必排第一名</b>。原因有两层：一是它体积巨大、白白拖慢构建上下文上传；二是你本机的 <code>node_modules</code> 可能是为 macOS/Windows 编译的二进制（如某些原生模块），拷进 Linux 容器会直接跑不起来——必须让容器内 <code>npm ci</code> 重新装。同理 <code>dist</code> 也排掉，强制容器内重新编译，保证产物干净。</div>
+
+<div class="rw">🌍 <b>实战（安全）：</b>两条生产铁律。①<b>密钥绝不打进镜像</b>：不要 <code>COPY .env</code>、不要在 Dockerfile 里写 <code>ENV DATABASE_URL=postgres://...密码</code>。镜像是会被分发、被人 <code>docker history</code> 翻层的，密钥进了镜像等于泄露。正确做法是<b>运行时通过环境变量注入</b>（compose 的 <code>environment</code> / 部署平台的 secret）。②<b>用非 root 用户跑</b>：官方 node 镜像自带 <code>node</code> 用户，加一句 <code>USER node</code>，万一应用被攻破，攻击者拿到的也只是低权限用户而非容器 root<sup><a href="#c2">2</a></sup>。</div>
+
+<h2><span class="n">5</span>用 docker compose 一键起整套全栈</h2>
+<p>现在 app 能打成镜像了，但 LinkPulse 还要 PostgreSQL 和 Redis 才能跑。手动 <code>docker run</code> 三次、再手配网络很麻烦。<b>Docker Compose</b> 让你用一个 <code>compose.yaml</code> 声明式地描述「这套应用由哪几个服务组成、怎么连」，然后 <code>docker compose up</code> 一键拉起全部<sup><a href="#c3">3</a></sup>。</p>
+
+<p>几个 Compose 核心概念（后端新概念，讲透）：</p>
+<ul>
+<li><b>service（服务）</b>：一个要跑的容器（或一组副本），比如 <code>app</code>、<code>postgres</code>、<code>redis</code>。</li>
+<li><b>自动网络 + 服务名 DNS</b>：Compose 会建一个内部网络，服务之间可以用<b>服务名当主机名</b>互相访问。所以 app 连数据库的地址不是 <code>localhost</code>，而是 <code>postgres</code>（服务名）。这是新人最常踩的坑。</li>
+<li><b><code>depends_on</code> + <code>condition: service_healthy</code></b>：声明启动顺序。但注意——<code>depends_on</code> 默认只等容器「<b>启动了</b>」，<b>不等里面的服务「就绪」</b>。Postgres 容器起来 ≠ 数据库能接受连接。要真正等就绪，得给被依赖服务配 <code>healthcheck</code>，再用 <code>condition: service_healthy</code> 等它健康<sup><a href="#c4">4</a></sup>。</li>
+<li><b><code>volumes</code>（卷）</b>：容器的可写层在删除时会消失。数据库数据要用<b>命名卷</b>持久化，否则 <code>compose down</code> 一次数据就没了。</li>
+</ul>
+
+<pre><code># compose.yaml （放项目根目录）
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: linkpulse
+      POSTGRES_PASSWORD: secret      # 本地开发用；生产请用 secret 注入
+      POSTGRES_DB: linkpulse
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # 持久化数据
+    healthcheck:
+      # pg_isready 探测数据库是否能接受连接
+      test: ["CMD-SHELL", "pg_isready -U linkpulse -d linkpulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]   # 返回 PONG 即健康
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .                # 用当前目录的 Dockerfile 构建镜像
+    ports:
+      - "3000:3000"         # 宿主机 3000 → 容器 3000
+    environment:
+      NODE_ENV: production
+      # 注意主机名用服务名 postgres / redis，不是 localhost
+      DATABASE_URL: postgres://linkpulse:secret@postgres:5432/linkpulse
+      REDIS_URL: redis://redis:6379
+      PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy   # 等 DB 真正就绪再启动 app
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:                   # 命名卷，数据在 compose down 后仍保留
+</code></pre>
+
+<div class="note"><b>迁移怎么跑？</b> 容器内不要在构建期跑 <code>prisma migrate</code>（那时连不上 DB）。两种常见做法：①临时手动 <code>docker compose run --rm app npx prisma migrate deploy</code>；②把 app 的启动命令改成「先迁移再启动」，例如在 compose 里给 app 加 <code>command: sh -c "npx prisma migrate deploy &amp;&amp; node dist/index.js"</code>。本地学习用第①种最直观。</div>
+
+<div class="rw">🌍 <b>实战：</b><code>compose</code> 最适合的场景是「<b>本地一键起全栈依赖</b>」和「<b>集成测试环境</b>」。生产环境通常交给 K8s 或云平台的容器服务编排，而不是直接 <code>compose up</code>。但 compose.yaml 仍然极有价值：它是项目「需要哪些依赖、怎么连」的<b>可执行文档</b>，新人 clone 下来 <code>docker compose up</code> 就有完整环境，比任何 README 都靠谱。另外注意：旧教程里的 <code>docker-compose</code>（带横杠、独立 Python 工具）已被官方淘汰，现在统一用 <code>docker compose</code>（作为 Docker CLI 插件）<sup><a href="#c3">3</a></sup>。</div>
+
+<h2><span class="n">6</span>跑起来 &amp; 验证</h2>
+<p>在 LinkPulse 项目根目录依次执行：</p>
+<pre><code># 构建并后台启动整套（app + postgres + redis）
+docker compose up --build -d
+
+# 看三个服务都起来了，postgres/redis 应显示 (healthy)
+docker compose ps
+
+# 首次需要建表：对着容器里的 app 跑迁移
+docker compose run --rm app npx prisma migrate deploy
+
+# 跟一下 app 日志，确认监听 3000
+docker compose logs -f app
+</code></pre>
+
+<p>然后验证业务链路（你在 Lesson 0001–0016 做好的功能此刻应整套可用）：</p>
+<pre><code># 创建一条短链
+curl -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" \
+  -d '{"targetUrl":"https://docs.docker.com"}'
+
+# 用返回的 shortCode 测 302 跳转（-I 只看响应头）
+curl -I http://localhost:3000/&lt;shortCode&gt;
+# 期望：HTTP/1.1 302 Found + Location: https://docs.docker.com
+# 第二次请求应命中 Redis 缓存（看 app 日志里的 cache hit）
+
+# 看完收工：停止并删除容器（pgdata 卷里的数据仍保留）
+docker compose down
+</code></pre>
+
+<p>如果 302 正常、二次请求命中缓存，说明 <b>app 镜像 ↔ postgres 服务 ↔ redis 服务</b>三者已经通过 compose 网络和环境变量正确串起来了——LinkPulse 完成了容器化。</p>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">Compose 网络</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">在第 5 节的 <code>compose.yaml</code> 里，app 服务的 <code>DATABASE_URL</code> 主机名为什么写 <code>postgres</code> 而不是 <code>localhost</code>？</p>
+  <button class="opt" data-correct="true" data-ex="对：Compose 会建内部网络，服务间用「服务名」作为可解析的主机名互相访问；在 app 容器里 localhost 指的是 app 容器自己，连不到 postgres 容器。">Compose 内部网络下服务名即主机名，localhost 指的是 app 容器自身</button>
+  <button class="opt" data-correct="false" data-ex="错：端口映射 3000:3000 是把宿主机端口映射到容器，和容器之间用服务名通信是两回事，不影响主机名解析。">因为只有把端口映射成 3000 才能用 localhost</button>
+  <button class="opt" data-correct="false" data-ex="错：Postgres 默认端口就是 5432，与主机名该写什么无关，这里端口本来也写了 5432。">因为 Postgres 默认端口不是标准端口所以不能用 localhost</button>
+  <button class="opt" data-correct="false" data-ex="错：alpine 只是更小的基础镜像，和 DNS 主机名解析没有任何关系。">因为用的是 alpine 镜像，alpine 不支持 localhost</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task"><h3>⌨️ 动手：把 LinkPulse 完整容器化并 compose up 跑通</h3>
+<ol>
+<li>在项目根目录写多阶段 <code>Dockerfile</code>（第 4 节版本）：builder 阶段 <code>npm ci</code> + <code>prisma generate</code> + <code>npm run build</code> + <code>npm prune --omit=dev</code>；runner 阶段从 <code>node:22-alpine</code> 起，<code>COPY --from=builder --chown=node:node</code> 捞 <code>node_modules</code>/<code>dist</code>/<code>package.json</code>/<code>prisma</code>，设 <code>USER node</code>。</li>
+<li>写 <code>.dockerignore</code>，确认 <code>node_modules</code>、<code>dist</code>、<code>.env</code> 都被排除。</li>
+<li>写 <code>compose.yaml</code> 编排 app + postgres(16-alpine) + redis(7-alpine)；给 pg/redis 配 <code>healthcheck</code>，app 用 <code>depends_on ... condition: service_healthy</code>；DB 数据挂命名卷 <code>pgdata</code>。</li>
+<li><code>docker compose up --build -d</code>，再 <code>docker compose run --rm app npx prisma migrate deploy</code> 建表。</li>
+<li>用 curl 创建短链、测 302 跳转、确认二次请求命中 Redis 缓存。</li>
+<li>额外加分：跑 <code>docker images</code> 对比「单阶段 vs 多阶段」镜像体积，记下差了多少 MB。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://docs.docker.com/guides/nodejs/containerize/" target="_blank" rel="noopener">Docker 官方 · Containerize a Node.js application</a>（含多阶段 Dockerfile、非 root 用户、.dockerignore 范例）。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b><code>docker compose ps</code> 显示三个服务（pg/redis 为 healthy）的截图，以及 curl 测出的 302 响应头；再发一下 <code>docker images</code> 里你这个镜像的体积。<br><strong>下一课预告：</strong>Lesson 0025 我们把这套镜像接上 CI/CD——用 GitHub Actions 自动构建、测试、推镜像，并部署到云端，让 LinkPulse 真正「能上线」。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://www.docker.com/resources/what-container/" target="_blank" rel="noopener">Docker · What is a Container?</a>（容器 vs 虚拟机：共享内核、轻量、秒级启动）</li>
+    <li id="c2"><a href="https://docs.docker.com/guides/nodejs/containerize/" target="_blank" rel="noopener">Docker Docs · Containerize a Node.js application</a>（多阶段构建、alpine 基础镜像、<code>--chown=node:node</code> 非 root 运行、.dockerignore、缓存友好的指令顺序）</li>
+    <li id="c3"><a href="https://docs.docker.com/compose/" target="_blank" rel="noopener">Docker Docs · Docker Compose overview</a>（compose.yaml 声明式编排、服务名网络、<code>docker compose</code> 取代旧 <code>docker-compose</code>）</li>
+    <li id="c4"><a href="https://docs.docker.com/compose/how-tos/startup-order/" target="_blank" rel="noopener">Docker Docs · Control startup and shutdown order in Compose</a>（<code>depends_on</code> + <code>condition: service_healthy</code> 与 <code>healthcheck</code> 语法）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0024 · 上一课 <a href="0023-automated-testing.html">自动化测试</a> · 下一课（预告）：<em>CI/CD 与部署</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

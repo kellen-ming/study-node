@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0026 · 产品化收官：Stripe 订阅计费 + 上线清单</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：计费数据流时序图 + 上线清单可勾选样式 */
+.flow{display:flex;flex-direction:column;gap:.5rem;margin:1rem 0;font-size:.86rem}
+.flow .step{display:flex;align-items:center;gap:.6rem;padding:.5rem .7rem;border:1px solid var(--bd,#3a3f4b);border-radius:8px;background:rgba(120,140,200,.07)}
+.flow .step b{flex:0 0 auto;display:inline-block;min-width:1.6rem;height:1.6rem;line-height:1.6rem;text-align:center;border-radius:50%;background:#6c8cff;color:#fff;font-size:.8rem}
+.flow .arrow{text-align:center;color:#8a93a6;font-size:.8rem;margin:-.2rem 0}
+.checklist{list-style:none;padding-left:0;margin:.6rem 0}
+.checklist li{padding:.35rem 0 .35rem 1.9rem;position:relative;border-bottom:1px dashed rgba(140,150,170,.25)}
+.checklist li:before{content:"\2610";position:absolute;left:0;top:.3rem;font-size:1.1rem;color:#6c8cff}
+.checklist li b{color:#e6b800}
+.plan-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.85rem}
+.plan-table th,.plan-table td{border:1px solid rgba(140,150,170,.3);padding:.5rem .7rem;text-align:left}
+.plan-table th{background:rgba(120,140,200,.12)}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0026 / 阶段 8</span></nav>
+<div class="kicker">Lesson 0026 · Node.js 后端之路 · 收官章 🎓</div>
+<h1>产品化收官：Stripe 订阅计费 + 上线清单</h1>
+
+<div class="mission">
+<b>为什么学这个？</b> 到现在 LinkPulse 已经能注册登录、创建/跳转/缓存短链、看实时数据、跑测试、容器化部署。但它还差最后一块——<b>怎么把它变成能真正收钱的生意</b>。本章给 LinkPulse 接入 <b>Stripe 订阅计费</b>：用户能从「免费版」一键升级成 <code>pro</code>，每月自动扣费；免费版限制最多 N 条短链。学完这一章，LinkPulse 就是一个<b>真实可上线运营、能持续收入的 SaaS</b>。最后我们用一份「上线清单」做收尾，并回顾你走过的整条路（0001 → 0026）。
+</div>
+
+<h2><span class="n">1</span>SaaS 计费模型 &amp; Stripe 的四个核心对象</h2>
+
+<p>先把心智模型立起来。SaaS（软件即服务）最常见的收费方式是<b>订阅制（subscription）</b>：用户不是一次性买断，而是<b>按月/按年自动续费</b>。这背后有一堆活儿：收信用卡、判断卡是否有效、每月自动扣款、扣款失败要重试、用户退款、发票、对账……自己做这些等于自建一家小银行，还要过 PCI 合规（处理信用卡数据的安全标准）。</p>
+
+<p><b>Stripe</b> 就是把这些全包了的支付基础设施。你只跟 Stripe 的 API 打交道，<b>信用卡号永远不经过你的服务器</b>（合规风险归 Stripe），你只负责「谁付了钱、给他开通什么权益」。</p>
+
+<p>Stripe 的计费世界由四个对象搭成，理解它们的关系是本章的地基<sup><a href="#c1">1</a></sup>：</p>
+
+<table class="plan-table">
+<tr><th>对象</th><th>是什么</th><th>类比</th><th>在 LinkPulse 里</th></tr>
+<tr><td><b>Product</b><br>(产品)</td><td>你卖的东西本身，跟价格无关</td><td>菜单上的「Pro 套餐」这道菜</td><td>"LinkPulse Pro"</td></tr>
+<tr><td><b>Price</b><br>(价格)</td><td>挂在 Product 上的具体定价：金额+币种+计费周期（recurring）</td><td>这道菜「¥39 / 月」这个标价牌</td><td>$9/月 的 recurring price</td></tr>
+<tr><td><b>Customer</b><br>(客户)</td><td>Stripe 里代表「一个付款人」的对象，存着支付方式</td><td>餐厅给你建的会员档案</td><td>对应一个 LinkPulse user</td></tr>
+<tr><td><b>Subscription</b><br>(订阅)</td><td>把 Customer 和 Price 绑在一起的「正在生效的合同」，Stripe 据此每月自动扣费</td><td>你签的「每月自动续」的会员卡</td><td>active = 用户是 pro</td></tr>
+</table>
+
+<p>关系链一句话：<b>一个 Customer 按某个 Price（属于某个 Product）建立一条 Subscription</b>。Subscription 有状态（<code>active</code> / <code>past_due</code> / <code>canceled</code> 等），<b>我们的任务就是：让 LinkPulse 的 <code>users.plan</code> 字段始终跟 Stripe 里这条 Subscription 的状态保持一致</b>。</p>
+
+<div class="note">
+<b>Product / Price 在哪建？</b> 不用写代码——在 Stripe Dashboard 里点几下就能建（测试模式下）。建好后拿到一个 <code>price_xxx</code> 形式的 ID，写进环境变量给后端用。代码层面我们几乎只跟 Customer / Subscription / Checkout Session 打交道。
+</div>
+
+<h2><span class="n">2</span>最省心的集成：Stripe Checkout（托管支付页）</h2>
+
+<p>收信用卡有两种做法：① 自己用 Stripe Elements 在前端拼一个支付表单（灵活但要写很多前端、要处理 3D 验证等）；② <b>Stripe Checkout</b>——Stripe 托管的一整页支付界面，你把用户重定向过去，付完再跳回来。</p>
+
+<div class="rw">🌍 <b>实战：</b>对绝大多数 SaaS，<b>Checkout + Webhook 是官方推荐、也是最稳的集成方式</b>。Checkout 页面由 Stripe 维护，自带卡号校验、3D Secure 验证、Apple Pay、各国本地支付方式、防欺诈、移动端适配——这些你一行都不用写，而且永远跟着监管更新。先用 Checkout 上线收钱，等真有定制需求再考虑 Elements。别一开始就自建支付 UI，那是过早优化。</div>
+
+<p>流程很简单：你在后端创建一个 <b>Checkout Session</b>（一次结账会话），Stripe 返回一个 URL，你让用户跳过去；用户付完款，Stripe 把他重定向回你的 <code>success_url</code>。</p>
+
+<p>关键参数<sup><a href="#c2">2</a></sup>：<code>mode: 'subscription'</code>（订阅模式，区别于一次性付款的 <code>'payment'</code>）、<code>line_items</code>（买什么——填我们的 recurring price ID）、<code>success_url</code> / <code>cancel_url</code>（付成功/取消后跳回哪）。</p>
+
+<p>先装库，并准备 Stripe 客户端单例（贴合我们已有的 ESM + 配置风格）：</p>
+
+<pre><code>npm i stripe</code></pre>
+
+<pre><code>// src/lib/stripe.ts —— 全局唯一的 Stripe 客户端
+import Stripe from 'stripe';
+
+if (!process.env.STRIPE_SECRET_KEY) {
+  throw new Error('缺少 STRIPE_SECRET_KEY 环境变量');
+}
+
+// apiVersion 锁版本：Stripe 会演进 API，固定版本能避免某天行为突变。
+// 订阅相关的 flexible billing mode 需要 2025-06-30.basil 或更新。[1]
+export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: '2025-06-30.basil',
+});</code></pre>
+
+<p>现在写「创建 Checkout Session」的接口。注意它需要登录态——我们沿用之前章节的认证中间件，从 <code>req.user</code> 拿到当前用户：</p>
+
+<pre><code>// src/modules/billing/billing.service.ts
+import { stripe } from '../../lib/stripe.js';
+import { prisma } from '../../lib/prisma.js';
+
+const PRICE_PRO = process.env.STRIPE_PRICE_PRO!; // price_xxx，Dashboard 里建好
+
+export async function createCheckoutSession(userId: string): Promise&lt;string&gt; {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+
+  // 一个 LinkPulse user 应对应一个固定的 Stripe Customer。
+  // 第一次升级时创建并把 id 存回我们的库（建议给 users 表加 stripe_customer_id 列）。
+  let customerId = user.stripeCustomerId;
+  if (!customerId) {
+    const customer = await stripe.customers.create({
+      email: user.email,
+      metadata: { linkpulseUserId: user.id }, // 反向关联，排查问题时很有用
+    });
+    customerId = customer.id;
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { stripeCustomerId: customerId },
+    });
+  }
+
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    customer: customerId,
+    line_items: [{ price: PRICE_PRO, quantity: 1 }],
+    success_url: `${process.env.APP_URL}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${process.env.APP_URL}/billing/cancel`,
+    // client_reference_id：把我们自己的 userId 写进去，webhook 里能立刻认出是谁。[2]
+    client_reference_id: user.id,
+  });
+
+  return session.url!; // 让前端 302 跳到这个 URL
+}</code></pre>
+
+<pre><code>// src/modules/billing/billing.controller.ts
+import type { Request, Response } from 'express';
+import { createCheckoutSession } from './billing.service.js';
+
+export async function postCheckout(req: Request, res: Response) {
+  const url = await createCheckoutSession(req.user!.id); // 认证中间件已注入 req.user
+  res.json({ url }); // 前端拿到 url 后 window.location = url
+}</code></pre>
+
+<div class="note">
+<b>为什么把 userId 同时塞进 <code>client_reference_id</code> 和 Customer 的 <code>metadata</code>？</b> 因为 webhook 回来时，Stripe 给的是它自己的 <code>customer</code> / <code>session</code> 对象，里面没有你的 userId。靠这两个字段你才能把「Stripe 世界的事件」映射回「LinkPulse 的哪个用户」。这是新手最常踩的断点。
+</div>
+
+<h2><span class="n">3</span>Webhook：让付款结果真正写进数据库</h2>
+
+<p>这里有个反直觉但<b>极其重要</b>的点：<b>用户被重定向回 <code>success_url</code>，不等于钱已到账、权益该开通</b>。用户可能关掉页面、网络可能断、有人可能伪造这个跳转。所以<b>绝不能在 success 页面里给用户升 pro</b>。</p>
+
+<p>真正可信的信号来自 <b>Webhook</b>——Stripe 在事件真实发生时，主动向你预先登记的一个 URL 发 POST 请求。「钱真的扣到了」这种事，由 Stripe 服务器异步告诉你，这才是<b>权益开通的唯一可信来源</b>。<sup><a href="#c3">3</a></sup></p>
+
+<p class="note" style="border:none;background:none;padding:0">前端复习：你熟悉的「我发请求、服务器回响应」是<b>客户端拉（pull）</b>。Webhook 反过来——<b>服务器主动推（push）</b>，Stripe 当客户端、你当服务器。本质就是一个普通的 POST 路由，只不过调用方是 Stripe。</p>
+
+<p>订阅场景下我们关心几个事件<sup><a href="#c4">4</a></sup>：</p>
+
+<table class="plan-table">
+<tr><th>事件</th><th>含义</th><th>LinkPulse 该做什么</th></tr>
+<tr><td><code>checkout.session.completed</code></td><td>用户在 Checkout 页付款成功、订阅已建立</td><td>把该用户 plan 设为 <code>pro</code></td></tr>
+<tr><td><code>customer.subscription.updated</code></td><td>订阅状态变了（续费成功、进入 past_due 等）</td><td>按订阅 status 同步 plan</td></tr>
+<tr><td><code>customer.subscription.deleted</code></td><td>订阅被取消/到期终止</td><td>把 plan 降回 <code>free</code></td></tr>
+</table>
+
+<p>整条计费数据流串起来是这样：</p>
+
+<div class="flow">
+  <div class="step"><b>1</b>用户点「升级 Pro」→ 前端调 <code>POST /billing/checkout</code></div>
+  <div class="arrow">↓ 后端创建 Checkout Session，返回 url</div>
+  <div class="step"><b>2</b>浏览器跳到 Stripe 托管页，用户输卡付款</div>
+  <div class="arrow">↓ 付款成功</div>
+  <div class="step"><b>3</b>Stripe 重定向用户回 success_url（仅 UI 提示，<b>不开权益</b>）</div>
+  <div class="arrow">↓ 同时，Stripe 服务器异步 POST</div>
+  <div class="step"><b>4</b>Webhook 收到 <code>checkout.session.completed</code> → <b>验签</b> → 更新 <code>users.plan = 'pro'</code></div>
+</div>
+
+<h2><span class="n">3.5</span>Webhook 签名校验：安全的生死线</h2>
+
+<div class="rw">🌍 <b>实战：</b>你的 webhook URL 是公开的，任何人都能往它发 POST。如果不验签，攻击者只要伪造一个 <code>checkout.session.completed</code> 请求，就能<b>白嫖开通 pro</b>。所以<b>验签不是可选项，是必须项</b>。Stripe 用你 endpoint 的密钥（<code>whsec_...</code>）对请求体做了 HMAC 签名放在 <code>Stripe-Signature</code> 头里，你用 SDK 重新算一遍、比对一致才信。</div>
+
+<p>验签靠 <code>stripe.webhooks.constructEvent(payload, sig, secret)</code><sup><a href="#c5">5</a></sup>。但有一个<b>所有人都会踩的坑</b>：它需要<b>未经解析的原始请求体（raw body）</b>。</p>
+
+<div class="rw">🌍 <b>实战（高频翻车点）：</b>我们之前全局用了 <code>express.json()</code>，它会把请求体解析成 JS 对象并<b>丢掉原始字节</b>。可验签必须用原始字节——哪怕重新 <code>JSON.stringify</code> 也会因为空格/键顺序不同而签名对不上。<b>解决：webhook 路由必须在 <code>express.json()</code> 之前注册，并对它单独用 <code>express.raw()</code></b>，让这一条路由拿到 Buffer。<sup><a href="#c5">5</a></sup></div>
+
+<p>看 app 里中间件的<b>注册顺序</b>（顺序就是一切）：</p>
+
+<pre><code>// src/app.ts（节选，注意顺序）
+import express from 'express';
+import { webhookRouter } from './modules/billing/webhook.router.js';
+import { apiRouter } from './routes.js';
+
+const app = express();
+
+// ① Webhook 必须在 express.json() 之前，且用 raw 拿原始 Buffer
+app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), webhookRouter);
+
+// ② 之后才挂全局 JSON 解析，给其余所有业务路由用
+app.use(express.json());
+app.use('/api', apiRouter);</code></pre>
+
+<pre><code>// src/modules/billing/webhook.router.ts
+import { Router, type Request, type Response } from 'express';
+import type Stripe from 'stripe';
+import { stripe } from '../../lib/stripe.js';
+import { prisma } from '../../lib/prisma.js';
+import { logger } from '../../lib/logger.js';
+
+export const webhookRouter = Router();
+const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET!; // whsec_...
+
+webhookRouter.post('/', async (req: Request, res: Response) =&gt; {
+  const sig = req.headers['stripe-signature'] as string;
+  let event: Stripe.Event;
+
+  // —— 验签：失败直接 400，绝不处理 ——
+  try {
+    // req.body 此处是 raw 中间件给的 Buffer，正是 constructEvent 需要的
+    event = stripe.webhooks.constructEvent(req.body, sig, WEBHOOK_SECRET);
+  } catch (err) {
+    logger.warn({ err }, 'Stripe 签名校验失败，拒绝');
+    return res.status(400).send(`Webhook Error: ${(err as Error).message}`);
+  }
+
+  // —— 幂等：Stripe 会重试，同一事件可能来好几次，靠 event.id 去重 ——[4]
+  const seen = await prisma.processedWebhook.findUnique({ where: { id: event.id } });
+  if (seen) return res.json({ received: true }); // 处理过了，直接确认
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const userId = session.client_reference_id; // 我们当初塞进去的
+        if (userId) {
+          await prisma.user.update({ where: { id: userId }, data: { plan: 'pro' } });
+          logger.info({ userId }, '用户升级到 pro ✅');
+        }
+        break;
+      }
+      case 'customer.subscription.updated': {
+        const sub = event.data.object as Stripe.Subscription;
+        const plan = sub.status === 'active' || sub.status === 'trialing' ? 'pro' : 'free';
+        await prisma.user.updateMany({
+          where: { stripeCustomerId: sub.customer as string },
+          data: { plan },
+        });
+        break;
+      }
+      case 'customer.subscription.deleted': {
+        const sub = event.data.object as Stripe.Subscription;
+        await prisma.user.updateMany({
+          where: { stripeCustomerId: sub.customer as string },
+          data: { plan: 'free' }, // 退订 → 降回免费版
+        });
+        break;
+      }
+      default:
+        logger.debug({ type: event.type }, '未处理的事件类型');
+    }
+
+    await prisma.processedWebhook.create({ data: { id: event.id } }); // 记下已处理
+    res.json({ received: true }); // 必须尽快回 200，否则 Stripe 会一直重试
+  } catch (err) {
+    logger.error({ err, type: event.type }, '处理 webhook 出错');
+    res.status(500).json({ error: 'handler failed' }); // 回非 2xx → Stripe 自动重试
+  }
+});</code></pre>
+
+<div class="note">
+<b>三条 Stripe 官方铁律<sup><a href="#c4">4</a></sup>：</b>① <b>验签</b>每个请求；② 按 <code>event.id</code> <b>幂等去重</b>（Stripe 保证「至少一次」投递，会重发）；③ <b>尽快返回 2xx</b>——重活儿别堵在响应里。返回非 2xx 会触发 Stripe 重试，这恰好是我们处理失败时想要的「自动补偿」。需要给 schema 加一张 <code>processed_webhooks(id text primary key)</code> 表来记录已处理事件。
+</div>
+
+<h2><span class="n">4</span>套餐限额：免费版只能建 N 条短链</h2>
+
+<p>收费的意义在于<b>免费版有限制、付费版解锁</b>。LinkPulse 最自然的限额是<b>短链数量</b>：免费版最多 5 条，pro 无限。</p>
+
+<div class="rw">🌍 <b>实战：</b>用量/套餐限额<b>一律在业务层（service）判断</b>，不要指望数据库约束或前端隐藏按钮。前端隐藏只是体验，真正的闸门必须在服务端——否则用户直接打 API 就绕过了。判断逻辑放在「创建短链」这个动作的最前面，超限就抛业务错误。</div>
+
+<p>我们的 users 表已经有 <code>plan</code> 字段，直接用：</p>
+
+<pre><code>// src/modules/links/links.service.ts（创建短链时加限额校验）
+import { prisma } from '../../lib/prisma.js';
+
+// 各套餐的短链数量上限；pro 用 Infinity 表示无限
+const LINK_QUOTA: Record&lt;string, number&gt; = { free: 5, pro: Infinity };
+
+export class QuotaExceededError extends Error {
+  status = 403; // 让错误中间件据此返回 403
+  code = 'QUOTA_EXCEEDED';
+}
+
+export async function createLink(userId: string, targetUrl: string) {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const limit = LINK_QUOTA[user.plan] ?? LINK_QUOTA.free;
+
+  // 已有多少条？超限就拦下，引导升级
+  const count = await prisma.link.count({ where: { userId } });
+  if (count &gt;= limit) {
+    throw new QuotaExceededError(
+      `免费版最多创建 ${limit} 条短链，升级到 Pro 即可无限创建`,
+    );
+  }
+
+  // 没超限，照常创建（沿用之前 nanoid 生成短码的逻辑）
+  return prisma.link.create({
+    data: { userId, targetUrl, shortCode: generateShortCode() },
+  });
+}</code></pre>
+
+<p>配合我们已有的 4 参数错误处理中间件，把 <code>QuotaExceededError</code> 翻成干净的 403 响应，前端就能据此弹出「升级」引导。这样「限额 → 引导升级 → Checkout → webhook 开通 pro → 限额解除」形成了完整闭环。</p>
+
+<div class="note">
+<b>并发小提醒：</b>「先 count 再 create」在高并发下理论上能被刷过一两条（竞态）。对短链这种弱约束业务，问题不大；若要严格，可用数据库事务 + 行锁，或给 user 维护一个计数列并在事务里 <code>UPDATE ... WHERE count &lt; limit</code>。收官阶段先求能跑，知道有这回事即可。
+</div>
+
+<h2><span class="n">5</span>本地测 Webhook：Stripe test mode + Stripe CLI</h2>
+
+<p>Webhook 最难测——它需要一个<b>公网 URL</b> 让 Stripe 能打进来，可你的 <code>localhost</code> 外网访问不到。官方答案是 <b>Stripe CLI</b>：它在你本机和 Stripe 之间建一条隧道，把云端事件转发到你的 localhost。<sup><a href="#c6">6</a></sup></p>
+
+<div class="rw">🌍 <b>实战：</b>全程在 <b>test mode</b>（测试模式）做——用测试密钥（<code>sk_test_...</code>）、测试卡号 <code>4242 4242 4242 4242</code>（任意未来日期 + 任意 CVC），不会产生真实扣款。<b>把所有事件路径都在 test mode 跑通、能稳定收到并正确更新 plan，再切真实密钥上线。</b>真金白银的流程，宁可多测十遍。</div>
+
+<pre><code># 1) 登录（一次性，浏览器授权）
+stripe login
+
+# 2) 监听并把事件转发到本地 webhook 路由
+stripe listen --forward-to localhost:3000/webhooks/stripe
+# 启动后会打印一个 whsec_... —— 这是 CLI 专用的本地签名密钥，
+# 注意它和 Dashboard 上线上 endpoint 的密钥不同！[6]
+# 把它写进本地 .env 的 STRIPE_WEBHOOK_SECRET 再启动你的服务
+
+# 3) 另开一个终端，手动触发一个事件来测试 handler
+stripe trigger checkout.session.completed</code></pre>
+
+<p>完整的本地回路：终端 A 跑 <code>stripe listen</code>，终端 B 跑你的 LinkPulse（<code>npm run dev</code>），浏览器走一遍真实的 Checkout（用测试卡），观察 <code>stripe listen</code> 打印事件、你的服务打印「升级到 pro」日志、数据库里 plan 确实变了。三处对上，说明集成成功。</p>
+
+<div class="note">
+<b>那线上呢？</b> 部署后在 Stripe Dashboard → Developers → Webhooks 里<b>注册一个正式 endpoint</b>（你的公网域名 + <code>/webhooks/stripe</code>），Stripe 会给你一个线上专用的 <code>whsec_...</code>，配进生产环境变量。本地用 CLI 的密钥，线上用 Dashboard 的密钥，两套别搞混。
+</div>
+
+<h2><span class="n">6</span>上线清单（Launch Checklist）</h2>
+
+<p>能收钱不等于能上线。一个面向真实用户、要收信用卡的 SaaS，上线前还有一串「成年人的责任」。下面这份清单可以直接抄进你的项目 README，逐条勾掉。</p>
+
+<div class="rw">🌍 <b>实战：</b>把它当成<b>真正可勾选的 checklist</b>，上线日一条条过。很多事故不是技术不行，而是「忘了开备份」「告警没配」「忘了限流被刷爆」。清单的价值就是把「我以为做了」变成「确认做了」。</div>
+
+<ul class="checklist">
+  <li><b>HTTPS / TLS</b>：全站强制 HTTPS（反向代理 Nginx/Caddy 或平台自带），Cookie 加 <code>Secure</code> + <code>HttpOnly</code> + <code>SameSite</code>。收信用卡的站点没有 HTTPS 是绝对红线。</li>
+  <li><b>密钥与环境隔离</b>：生产用真实 Stripe 密钥，且只存在生产环境变量/密钥管理里，<b>绝不进 git</b>；<code>.env</code> 已在 <code>.gitignore</code>。</li>
+  <li><b>限流（Rate limiting）</b>：给登录、注册、创建短链、跳转接口加限流（如 <code>express-rate-limit</code> + Redis），防刷防滥用，保护数据库。</li>
+  <li><b>错误追踪（Error tracking）</b>：接入 Sentry 之类，未捕获异常能自动上报，别等用户投诉才知道挂了。</li>
+  <li><b>监控告警（Monitoring &amp; alerting）</b>：健康检查 <code>/health</code>、关键指标（错误率、响应时延、DB/Redis 连接），异常时能<b>主动通知到人</b>（邮件/Slack）。</li>
+  <li><b>数据备份</b>：PostgreSQL 开启<b>自动定时备份</b>并<b>实测恢复一次</b>——没验证过的备份等于没有备份。</li>
+  <li><b>Webhook 健壮性</b>：验签 ✓、幂等去重 ✓、失败返回非 2xx 让 Stripe 重试 ✓、Dashboard 里能看到投递日志。</li>
+  <li><b>隐私政策 &amp; 服务条款</b>：收集邮箱/IP、接 Stripe 收款，法律上需要 Privacy Policy 与 Terms of Service 页面（GDPR/CCPA 等）。</li>
+  <li><b>日志合规</b>：结构化日志（pino 已有）里<b>不要记密码、不要记完整卡号/密钥</b>。</li>
+  <li><b>优雅关闭</b>：收到 SIGTERM 时停止接新请求、放完在途请求、关掉 DB/Redis 连接（部署滚动更新时不丢请求）。</li>
+  <li><b>CI/CD 卡口</b>：测试不过不许部署（上一课已搭），上线走流水线而非手动 SSH 改文件。</li>
+  <li><b>套餐限额复核</b>：免费版限额在服务端生效、付费后真的解除、退订后真的降级——端到端走一遍。</li>
+</ul>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">Webhook 安全</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">用户付款后被重定向回了你的 <code>success_url</code>。下列哪种做法是<b>正确且安全</b>的「把用户升级为 pro」的方式？</p>
+  <button class="opt" data-correct="true" data-ex="对。权益开通的唯一可信来源是经过签名校验的 webhook 事件（如 checkout.session.completed），因为它来自 Stripe 服务器、不可被用户伪造，且代表钱真的到账。">在 webhook 端点收到并验签通过 <code>checkout.session.completed</code> 后，再更新数据库里的 plan</button>
+  <button class="opt" data-correct="false" data-ex="错。success_url 只是 UI 跳转，用户可能没真正付款、可能直接手敲这个 URL，绝不能据此开通权益。">在 <code>success_url</code> 对应的页面里直接把当前用户更新为 pro</button>
+  <button class="opt" data-correct="false" data-ex="错。前端状态完全可被用户篡改，任何权益判断都必须在服务端、且基于可信来源。">在前端 JS 里检测到跳转成功，就把本地状态改成 pro</button>
+  <button class="opt" data-correct="false" data-ex="错。不验签的 webhook 任何人都能伪造请求白嫖 pro，验签是必须项而非可选项。">在 webhook 里收到事件就直接更新 plan，验签可省略以图省事</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+<h3>⌨️ 动手：给 LinkPulse 接上 Stripe 计费并写下上线清单</h3>
+<ol>
+  <li><code>npm i stripe</code>；在 Stripe Dashboard（test mode）建一个 Product「LinkPulse Pro」和一个 $9/月 的 recurring Price，把 <code>price_xxx</code> 写进 <code>.env</code>。</li>
+  <li>建 <code>src/lib/stripe.ts</code> 客户端单例；给 users 表加 <code>stripe_customer_id</code>（迁移一次 Prisma schema），新增 <code>processed_webhooks</code> 表。</li>
+  <li>实现 <code>POST /billing/checkout</code>（带认证）：创建 Customer（首次）+ Checkout Session，返回 url。</li>
+  <li>实现 <code>POST /webhooks/stripe</code>：用 <code>express.raw()</code> 单独挂载（注册在 <code>express.json()</code> 之前），<code>constructEvent</code> 验签 → 按 <code>event.id</code> 幂等 → 处理三个订阅事件 → 更新 <code>users.plan</code>。</li>
+  <li>在创建短链的 service 里加套餐限额：free 最多 5 条，超限抛 403。</li>
+  <li>用 Stripe CLI 本地全流程跑通：<code>stripe listen --forward-to localhost:3000/webhooks/stripe</code> + 浏览器用测试卡 <code>4242…</code> 走一遍 Checkout，确认 plan 变成 pro。</li>
+  <li>照着第 6 节，写下<b>你自己 LinkPulse 的上线清单</b>，逐条评估当前状态。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://docs.stripe.com/billing/subscriptions/build-subscriptions" target="_blank" rel="noopener">Stripe Docs · Build a subscriptions integration</a>（订阅 + Checkout + Webhook 的官方端到端指南）。</div>
+
+<div class="ask">
+👩‍🏫 <b>跑通后发我：</b>① 你 <code>stripe listen</code> 收到 <code>checkout.session.completed</code> 那一刻、服务端打印「升级到 pro」的日志截图；② 数据库里该用户 <code>plan</code> 从 free 变 pro 的记录；③ 你写的上线清单（哪些已勾、哪些待办）。
+<br>
+<br>🎉 <b>恭喜你完成整套课程！</b> 回头看这条路：<b>0001–0005</b> Node/模块/异步打底 → <b>0006–0010</b> Express 分层、zod 校验、错误处理、pino 日志、配置 → <b>0011–0016</b> PostgreSQL + Prisma 建模与类型安全 CRUD、Redis 缓存跳转 → <b>0017–0025</b> 认证登录、点击分析看板、自动化测试、Docker 容器化、CI/CD 部署 → <b>0026</b> Stripe 订阅收费 + 上线清单。LinkPulse 现在是一个<b>能注册登录、创建/跳转/缓存短链、看实时数据、能测试、能容器化部署、能订阅收费的完整 SaaS</b>。你已经从「会写前端」真正跨进了「能独立交付后端产品」。
+<br>
+<br><strong>下一步方向（不再是固定课程，而是你的产品路线图）：</strong>① <b>前端整合</b>——给 LinkPulse 配一个真正好用的管理后台/落地页；② <b>营销页 &amp; SEO</b>——让别人能搜到、能转化；③ <b>用户增长</b>——分享裂变、邀请、数据驱动迭代；④ <b>持续迭代</b>——按真实用户反馈打磨。代码已经能上线，接下来是把它变成有人用、有人付费的真正生意。去发布它吧 🚀
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://docs.stripe.com/billing/subscriptions/build-subscriptions" target="_blank" rel="noopener">Stripe Docs · Build a subscriptions integration</a>（Product / Price / Customer / Subscription 模型与订阅集成流程；flexible billing mode 需 API 版本 2025-06-30.basil 及以上）</li>
+    <li id="c2"><a href="https://docs.stripe.com/api/checkout/sessions/create" target="_blank" rel="noopener">Stripe API Reference · Create a Checkout Session</a>（subscription 模式所需参数：mode、line_items、success_url、cancel_url、customer、client_reference_id、metadata）</li>
+    <li id="c3"><a href="https://docs.stripe.com/payments/checkout/fulfill-orders" target="_blank" rel="noopener">Stripe Docs · Fulfill orders / Checkout</a>（权益开通应基于 webhook 事件而非 success_url 重定向）</li>
+    <li id="c4"><a href="https://docs.stripe.com/billing/subscriptions/webhooks" target="_blank" rel="noopener">Stripe Docs · Using webhooks with subscriptions</a>（checkout.session.completed / customer.subscription.updated / deleted 等事件；幂等去重、尽快返回 2xx、按 event.id 去重）</li>
+    <li id="c5"><a href="https://docs.stripe.com/webhooks/signature" target="_blank" rel="noopener">Stripe Docs · Webhook signature verification</a>（constructEvent 三参数、必须用原始 raw body、Express 中需在 express.json() 之前用 express.raw()）</li>
+    <li id="c6"><a href="https://docs.stripe.com/webhooks#test-webhook" target="_blank" rel="noopener">Stripe Docs · Stripe CLI / 本地测试 webhook</a>（stripe listen --forward-to、stripe trigger、CLI 专用签名密钥与线上 endpoint 密钥不同）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0026 · 上一课 <a href="0025-cicd-and-deployment.html">CI/CD 与部署</a> · 下一课（预告）：<em>课程收官，后续方向 —— 前端整合 / 营销页与 SEO / 用户增长 / 持续迭代</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

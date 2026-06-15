@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0014 · Prisma 上手：类型安全地操作数据库</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  /* 本章专属：把「TS 对象 ↔ 数据库表」的映射画成两栏对照，帮助建立 ORM 直觉 */
+  .map{display:grid; grid-template-columns:1fr auto 1fr; gap:.6rem; align-items:center; margin:1.2rem 0; font-size:.8rem}
+  .map .col{background:#fbf7ee; border:1px solid var(--rule); border-radius:8px; padding:.6rem .7rem}
+  .map .col h4{margin:.1rem 0 .5rem; font-size:.74rem; color:var(--accent); letter-spacing:.02em}
+  .map .col code{display:block; font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.74rem; line-height:1.6}
+  .map .arrow{font-size:1.4rem; color:var(--accent); text-align:center; font-weight:700}
+  @media(max-width:640px){ .map{grid-template-columns:1fr; } .map .arrow{transform:rotate(90deg)} }
+  /* 流程条：init → schema → migrate → generate → query */
+  .flow{display:flex; flex-wrap:wrap; gap:.35rem; align-items:center; justify-content:center; margin:1.1rem 0; font-size:.74rem}
+  .flow .step{background:#fffefb; border:1px solid var(--accent); border-radius:6px; padding:.4rem .6rem; font-family:"SF Mono",Menlo,Consolas,monospace; text-align:center}
+  .flow .sep{color:var(--accent); font-weight:700}
+  .flow .lbl{display:block; font-size:.64rem; color:var(--muted); margin-top:.15rem; font-family:system-ui,sans-serif}
+  .badge{display:inline-block; font-size:.68rem; background:#f4f1e4; border:1px solid var(--rule); border-radius:5px; padding:.05rem .4rem; font-family:"SF Mono",Menlo,Consolas,monospace; color:var(--accent)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0014 / 阶段 3</span>
+</nav>
+
+<div class="kicker">Lesson 0014 · Node.js 后端之路</div>
+<h1>Prisma 上手：类型安全地操作数据库<br>（让 LinkPulse 的表「长出」TypeScript 类型）</h1>
+
+<div class="mission">
+  <b>从「手写 SQL 字符串」到「类型安全的对象操作」。</b>
+  上一课（0013）你把 LinkPulse 设计成了三张表——<code>users</code> / <code>links</code> / <code>clicks</code>，画好了字段、主键、外键和关系。
+  但那只是纸面设计：你还没在 TypeScript 代码里真正「拿到」这些表。
+  这一课你将认识 <strong>Prisma</strong>——一个 <strong>TS-first 的 ORM</strong>。你会把 0013 的设计写进一个 <code>schema.prisma</code> 文件，
+  用一条命令 <span class="badge">prisma migrate dev</span> 把它<strong>变成真实的数据库表</strong>，
+  然后用<strong>带自动补全、拼错字段编译期就报错</strong>的 Prisma Client 跑一个查询验证。
+  跑通后，下一课（0015）我们就把 Lesson 0006 那个返回「假短码」的 <code>POST /api/links</code> 改造成真正写库的 CRUD 接口。
+</div>
+
+<div class="note">
+  <b>版本说明（很重要）：</b>本课基于 <strong>Prisma ORM 7</strong>（2025-11 起成为默认版本<sup><a href="#c6">6</a></sup>）。
+  Prisma 7 和网上很多旧教程有<strong>三处关键差异</strong>：① 连接数据库要装一个 <em>driver adapter（驱动适配器）</em>；
+  ② 生成的 Client 从你指定的 <code>output</code> 目录导入，<strong>不再</strong>从 <code>@prisma/client</code> 直接 <code>import { PrismaClient }</code>；
+  ③ 数据库连接串配在 <code>prisma.config.ts</code> 里。本课代码全部按 v7 写，照着敲就能跑。
+</div>
+
+<h2><span class="n">1</span>ORM 是什么：对象 ↔ 表的「翻译官」</h2>
+<p>
+  上一课你直接写 SQL：<code>SELECT * FROM links WHERE code = 'abc123'</code>。
+  能用，但有两个痛点你很快会撞上：
+</p>
+<ol>
+  <li><b>SQL 是「字符串」，编辑器帮不上忙。</b> 你把 <code>code</code> 拼成 <code>cdoe</code>，TypeScript 完全不知道——程序照样编译，跑到那一行才在运行时炸（甚至悄悄返回空结果）。</li>
+  <li><b>结果是「无类型的一坨」。</b> 数据库返回的行，在 TS 里往往是 <code>any</code> 或 <code>Record&lt;string, unknown&gt;</code>，你访问 <code>row.shortCode</code> 时编辑器既不补全也不报错。</li>
+</ol>
+<p>
+  <strong>ORM</strong>（Object–Relational Mapping，<strong>对象关系映射</strong>）就是来解决这个落差的。
+  它是一层位于「你的代码」和「数据库」之间的库，干一件核心的事：<strong>把数据库里的「表 / 行 / 列」翻译成你代码里的「类型 / 对象 / 属性」，反过来也一样。</strong>
+</p>
+<div class="map">
+  <div class="col">
+    <h4>数据库世界（SQL）</h4>
+    <code>表 links</code>
+    <code>一行记录</code>
+    <code>列 short_code (text)</code>
+    <code>外键 owner_id</code>
+  </div>
+  <div class="arrow">⇄</div>
+  <div class="col">
+    <h4>你的代码世界（TS）</h4>
+    <code>类型 Link</code>
+    <code>一个对象 {…}</code>
+    <code>属性 shortCode: string</code>
+    <code>关系 owner: User</code>
+  </div>
+</div>
+<p>有了这层翻译，你就<strong>不再手写 SQL 字符串</strong>，而是调方法：</p>
+<div class="cmp">
+  <div>
+    <h4>上一课：手写 SQL 字符串</h4>
+    <pre><code>// 字段名是字符串，拼错也不报错
+const sql =
+  "SELECT * FROM links WHERE code = $1";
+const rows = await db.query(sql, ["abc123"]);
+const link = rows[0]; // 类型是 any 😟</code></pre>
+  </div>
+  <div>
+    <h4>本课：ORM 的方法调用</h4>
+    <pre><code>// 字段名有补全，拼错编译期就红线
+const link = await prisma.link.findUnique({
+  where: { shortCode: "abc123" },
+});
+// link 的类型是 Link | null ✅</code></pre>
+  </div>
+</div>
+
+<h3 style="font-size:.95rem; margin-top:1.4rem">类比：ORM 像「中英翻译官」</h3>
+<p>
+  把数据库想成只会说「SQL 语」的老专家，你的 TS 代码只会说「对象语」。
+  ORM 就是站在中间的<strong>同声传译</strong>：你说「给我 <code>shortCode</code> 等于 abc123 的那条 link」，
+  它实时翻成 <code>SELECT ... WHERE short_code = 'abc123'</code> 递给数据库；数据库吐回一行，它再翻成一个带类型的 <code>Link</code> 对象塞回你手里。
+  你和数据库都不用学对方的语言。
+</p>
+
+<div class="rw">🌍 <b>实战：ORM 天然防 SQL 注入。</b>
+  还记得上一课强调的「永远不要把用户输入拼进 SQL 字符串」吗？
+  比如 <code>"... WHERE code = '" + userInput + "'"</code>，用户传个 <code>' OR '1'='1</code> 就能把你整张表读走——这就是 <strong>SQL 注入</strong>。
+  用 ORM，你<strong>从源头就不写 SQL 字符串</strong>，而是传一个值 <code>{ shortCode: userInput }</code>。
+  Prisma 在底层用<strong>参数化查询（parameterized query）</strong>把这个值作为「数据」而非「代码」发给数据库<sup><a href="#c7">7</a></sup>，注入攻击因此几乎被结构性地杜绝。安全不再依赖你「记得转义」。
+</div>
+
+<h2><span class="n">2</span>为什么 LinkPulse 选 Prisma：schema 自动生成类型</h2>
+<p>
+  ORM 有很多（Node 生态里还有 TypeORM、Sequelize、Drizzle 等）。我们选 <strong>Prisma</strong>，因为它对你这种 <em>TypeScript 项目</em>有一个杀手锏：
+  <strong>一份 schema 文件，自动生成全套 TypeScript 类型和一个带补全的查询客户端。</strong>
+</p>
+<p>Prisma 的工作方式分三块，先建立全景，后面逐一动手：</p>
+<ol>
+  <li><b>Prisma Schema（<code>schema.prisma</code>）</b>：一个用 Prisma 自家语法写的文件，<strong>唯一的真相来源（single source of truth）</strong>。你在这里描述「有哪些表、每张表有哪些字段、表之间什么关系」<sup><a href="#c2">2</a></sup>。</li>
+  <li><b>Prisma Migrate</b>：读你的 schema，生成 SQL 迁移文件并应用到数据库——也就是<strong>真正把表建出来 / 改结构</strong>。</li>
+  <li><b>Prisma Client</b>：根据 schema <strong>自动生成</strong>的一个查询库。它<strong>知道</strong>你有哪些表、哪些字段、什么类型，所以 <code>prisma.link.findUnique(...)</code> 全程有补全，写错就报错。</li>
+</ol>
+<div class="note">
+  <b>「自动生成」是关键词。</b> 你不用手写一行 TypeScript 接口去描述 <code>Link</code> 长什么样。
+  你只维护 <code>schema.prisma</code> 这一份文件，跑一下 <code>prisma generate</code>，对应的 <code>Link</code>、<code>User</code>、<code>Click</code> 类型和查询方法就全有了。
+  schema 改了，重新生成，类型自动跟着变——<strong>数据库结构和代码类型永远不会对不上</strong>。
+</div>
+
+<div class="rw">🌍 <b>实战：类型安全意味着「拼错字段，编译期就报错」。</b>
+  这是 Prisma 最让人上瘾的体验。假设你查 link 时把字段名写成了 <code>shortCdoe</code>：
+  <pre><code>// ❌ 字段名拼错
+await prisma.link.findUnique({
+  where: { shortCdoe: "abc123" },
+  //       ~~~~~~~~~ TS 报错：Object literal may only
+  //       specify known properties, 'shortCdoe' does not
+  //       exist in type 'LinkWhereUniqueInput'
+});</code></pre>
+  你<strong>还没运行</strong>，编辑器就划了红线、CI 的 <code>tsc</code> 直接构建失败。
+  对比手写 SQL 字符串——拼错要等到线上用户访问那条短链、接口 500 了才发现。
+  在一个要收费的 SaaS 里，这种「把运行时事故提前到编译期」的能力，直接换算成更少的线上故障和更短的排查时间。
+</div>
+
+<h2><span class="n">3</span>安装 Prisma 并初始化</h2>
+<p>回到你的 <code>study-node</code> 项目根目录（就是有 <code>package.json</code>、<code>"type":"module"</code> 的那个）。先装依赖。</p>
+<p>这里要装<strong>四个</strong>包，各司其职（前端复习：<code>-D</code> / <code>--save-dev</code> 表示只在开发期用的依赖）：</p>
+<pre><code class="lang-bash"># prisma：命令行工具（init / migrate / generate / studio），只开发期用 → -D
+npm i -D prisma
+
+# @prisma/client：运行时查询库，线上也要用 → 普通依赖
+npm i @prisma/client
+
+# 连接 PostgreSQL 的「驱动适配器」+ 底层驱动（Prisma 7 必需）
+npm i @prisma/adapter-pg pg
+npm i -D @types/pg            # pg 的 TypeScript 类型</code></pre>
+<div class="note">
+  <b>为什么 v7 多了 <code>@prisma/adapter-pg</code> 和 <code>pg</code>？</b>
+  Prisma 7 起，Client <strong>必须</strong>通过一个 <em>driver adapter（驱动适配器）</em>连数据库；
+  <code>pg</code> 是 Node 生态最常用的 PostgreSQL 驱动，<code>@prisma/adapter-pg</code> 是把 Prisma 接到 <code>pg</code> 上的「转接头」<sup><a href="#c6">6</a></sup>。
+  你不用直接调它们，配一次就行（见第 6 节）。用别的库（如 MySQL）适配器名字会不同。
+</div>
+<p>装完，初始化 Prisma：</p>
+<pre><code class="lang-bash">npx prisma init --datasource-provider postgresql</code></pre>
+<p>这条命令在项目里生成几样东西<sup><a href="#c1">1</a></sup>：</p>
+<div class="tree">
+study-node/
+├─ prisma/
+│  └─ <b>schema.prisma</b>   ← 你的数据模型（核心，接下来要写它）
+├─ <b>prisma.config.ts</b>   ← Prisma CLI 配置（连接串在这里读）
+├─ <b>.env</b>               ← 放 DATABASE_URL（密码别提交到 git！）
+└─ package.json
+</div>
+<div class="note">
+  <b>把 <code>.env</code> 和生成目录加进 <code>.gitignore</code>。</b>
+  <code>.env</code> 里有数据库密码，绝不能进版本库；下一节会指定 Client 生成到 <code>src/generated/prisma</code>，那是构建产物，也不必提交。
+  在你的 <code>.gitignore</code> 里确保有这两行：<br>
+  <pre><code>.env
+src/generated/prisma</code></pre>
+</div>
+
+<h2><span class="n">4</span>把 0013 的三张表写成 model</h2>
+<p>
+  打开 <code>prisma/schema.prisma</code>。文件顶部有两个块：<code>generator</code>（告诉 Prisma 生成什么客户端、放哪）和 <code>datasource</code>（用什么数据库）。
+  把它们改成 v7 的写法：
+</p>
+<pre><code class="lang-prisma">// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client"          // v7 的新生成器
+  output   = "../src/generated/prisma" // 生成的 Client 放这里
+}
+
+datasource db {
+  provider = "postgresql"             // 用 PostgreSQL（连接串在 prisma.config.ts）
+}</code></pre>
+<div class="note">
+  <b>和旧教程的差异：</b>旧版这里写 <code>provider = "prisma-client-js"</code> 且不需要 <code>output</code>，连接串也写在 <code>datasource</code> 里（<code>url = env("DATABASE_URL")</code>）。
+  v7 改成了 <code>"prisma-client"</code>、<strong>必须</strong>指定 <code>output</code>，连接串移到了 <code>prisma.config.ts</code><sup><a href="#c6">6</a></sup>。看到旧写法不要照抄。
+</div>
+
+<h3 style="font-size:.95rem; margin-top:1.4rem">写第一个 model：User</h3>
+<p>
+  在 schema 里，一个 <code>model</code> 就对应一张表。语法是 <code>model 名字 { 字段... }</code>。
+  每个字段写成 <code>字段名 类型 [可选属性...]</code>。先看 <code>users</code> 表怎么落地：
+</p>
+<pre><code class="lang-prisma">model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  createdAt DateTime @default(now())
+  links     Link[]   // 一个 User 拥有多个 Link（关系字段，下面解释）
+}</code></pre>
+<p>逐项拆解这些「属性（attribute）」——它们以 <code>@</code> 开头，是 Prisma 给字段加的修饰<sup><a href="#c2">2</a></sup>：</p>
+<ul>
+  <li><code>Int</code> / <code>String</code> / <code>DateTime</code>：Prisma 的字段类型，会映射成对应的 SQL 类型（<code>Int</code>→<code>integer</code>，<code>String</code>→<code>text</code>，<code>DateTime</code>→<code>timestamp</code>）。</li>
+  <li><code>@id</code>：把这个字段设为<strong>主键</strong>（对应上一课的 PRIMARY KEY）。</li>
+  <li><code>@default(autoincrement())</code>：插入时数据库自动生成递增整数 ID，你不用自己填。</li>
+  <li><code>@unique</code>：<strong>唯一约束</strong>。两个用户不能用同一个 email。（这也让 email 能用于 <code>findUnique</code> 查询。）</li>
+  <li><code>@default(now())</code>：插入时自动填当前时间。</li>
+  <li><code>links Link[]</code>：注意它的类型是 <code>Link[]</code>（数组）。这<strong>不是</strong>数据库里的一列，而是一个<strong>关系字段</strong>——它在告诉 Prisma「一个 User 关联着多个 Link」。下面讲关系。</li>
+</ul>
+
+<h3 style="font-size:.95rem; margin-top:1.4rem">写关系：Link 属于某个 User（一对多）</h3>
+<p>
+  上一课你用<strong>外键（foreign key）</strong><code>owner_id</code> 把 link 关联到 user。
+  在 Prisma 里，一对多关系要在<strong>两边</strong>都写：父表（User）写一个数组字段，子表（Link）写「外键标量字段 + 关系字段」<sup><a href="#c4">4</a></sup>。
+</p>
+<pre><code class="lang-prisma">model Link {
+  id        Int      @id @default(autoincrement())
+  shortCode String   @unique          // 短码，唯一
+  longUrl   String                    // 原始长链接
+  createdAt DateTime @default(now())
+
+  // —— 关系：每个 Link 属于一个 User ——
+  ownerId   Int                       // 外键「标量字段」(真实存在于表里的列)
+  owner     User     @relation(fields: [ownerId], references: [id])
+  //         ↑关系字段      ↑用本表 ownerId   ↑指向 User.id
+
+  // —— 关系：一个 Link 有多次点击 ——
+  clicks    Click[]
+}</code></pre>
+<p>关键理解（这是 Prisma 关系最容易绕晕的地方）：</p>
+<ul>
+  <li><code>ownerId Int</code> 是<strong>真实的数据库列</strong>（就是外键），存着所属 user 的 id。</li>
+  <li><code>owner User @relation(...)</code> 是<strong>虚拟的关系字段</strong>，数据库里没有这一列；它只存在于 Prisma / TS 层面，方便你写 <code>link.owner.email</code> 这样的代码。<code>@relation(fields: [ownerId], references: [id])</code> 告诉 Prisma：用本表的 <code>ownerId</code> 去匹配 <code>User</code> 表的 <code>id</code>。</li>
+  <li>对应地，上面 <code>User</code> 里的 <code>links Link[]</code> 是这条关系的「另一头」。两边合起来，Prisma 才知道这是一对多。</li>
+</ul>
+
+<h3 style="font-size:.95rem; margin-top:1.4rem">第三张表：Click（点击记录）</h3>
+<p>把 0013 的 <code>clicks</code> 也写上——每条点击属于一个 Link：</p>
+<pre><code class="lang-prisma">model Click {
+  id        Int      @id @default(autoincrement())
+  clickedAt DateTime @default(now())
+  ipAddress String?                   // ? 表示可空（nullable）
+  userAgent String?
+
+  // 每条点击属于一个 Link
+  linkId    Int
+  link      Link     @relation(fields: [linkId], references: [id])
+}</code></pre>
+<div class="note">
+  <b>新语法点：<code>String?</code> 末尾的问号</b> 表示这个字段<strong>可空（nullable）</strong>，对应 SQL 里没有 <code>NOT NULL</code>。
+  没有问号的字段默认是<strong>必填</strong>的。这正好对上你写 TS 时熟悉的 <code>ip?: string</code> 可选属性直觉——拿到的对象里它的类型会是 <code>string | null</code>。
+</div>
+<p>
+  到这里，0013 的三张表 + 它们的关系，已经完整地变成了一份 <code>schema.prisma</code>。
+  这就是你整个数据层的「真相来源」——以后改结构，改这里就对了。
+</p>
+
+<h2><span class="n">5</span>配置连接串，跑迁移建表</h2>
+<p>先把数据库连接信息填好。打开根目录的 <code>.env</code>，写上你上一课用的那个 PostgreSQL 连接串<sup><a href="#c5">5</a></sup>：</p>
+<pre><code class="lang-bash"># .env  （格式：postgresql://用户名:密码@主机:端口/数据库名?schema=public）
+DATABASE_URL="postgresql://postgres:你的密码@localhost:5432/linkpulse?schema=public"</code></pre>
+<p>
+  然后看 <code>prisma init</code> 生成的 <code>prisma.config.ts</code>。v7 在这里读环境变量并告诉 CLI 连哪个库。确认它长这样（按需补全）<sup><a href="#c6">6</a></sup>：
+</p>
+<pre><code class="lang-ts">// prisma.config.ts
+import "dotenv/config";                         // 让它能读到 .env
+import { defineConfig, env } from "prisma/config";
+
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: { path: "prisma/migrations" },
+  datasource: {
+    url: env("DATABASE_URL"),                   // 从 .env 读连接串
+  },
+});</code></pre>
+<div class="note">
+  <b>前端复习 + 后端语境：</b><code>process.env</code> / <code>.env</code> 你在前端构建里见过（如 <code>VITE_*</code>）。
+  后端用它的理由更硬核：<strong>数据库密码这类机密绝不能写进代码</strong>。
+  <code>"dotenv/config"</code> 这一行的作用就是在程序启动时把 <code>.env</code> 的内容加载进 <code>process.env</code>，<code>env("DATABASE_URL")</code> 再去取。
+  线上则由部署平台注入真正的环境变量，<code>.env</code> 只用于本地。
+</div>
+
+<h3 style="font-size:.95rem; margin-top:1.4rem">一条命令，把 schema 变成真实的表</h3>
+<p>万事俱备，跑迁移：</p>
+<pre><code class="lang-bash">npx prisma migrate dev --name init</code></pre>
+<p>
+  <code>migrate dev</code> 是开发期的迁移命令。<code>--name init</code> 给这次迁移起个名字（首次一般叫 init）。
+  它会一次性帮你做完这条流水线<sup><a href="#c3">3</a></sup>：
+</p>
+<div class="flow">
+  <span class="step">读 schema<span class="lbl">对比当前库</span></span>
+  <span class="sep">→</span>
+  <span class="step">生成 .sql<span class="lbl">写进 migrations/</span></span>
+  <span class="sep">→</span>
+  <span class="step">在库里执行<span class="lbl">真正建表</span></span>
+  <span class="sep">→</span>
+  <span class="step">prisma generate<span class="lbl">生成 Client+类型</span></span>
+</div>
+<p>跑完你会看到 <code>prisma/migrations/</code> 下多了一个带时间戳的文件夹，里面是一份 <code>migration.sql</code>——里面正是你<strong>没手写</strong>、由 Prisma 替你生成的 <code>CREATE TABLE</code> 语句。打开瞄一眼，会发现它和上一课你手敲的 SQL 长得很像，只是现在由 schema 自动产出。</p>
+
+<div class="rw">🌍 <b>实战：migrate 是团队协作与「schema 演进」的命脉。</b>
+  真实项目里，表结构会不停变：这周给 <code>links</code> 加个 <code>expiresAt</code>（过期时间），下周给订阅功能加个 <code>plan</code> 字段。
+  你每改一次 schema、跑一次 <code>migrate dev --name add_expires_at</code>，Prisma 就<strong>新增</strong>一个带时间戳的迁移文件，记录「这一步把数据库从什么状态改成了什么状态」。
+  这些文件<strong>跟代码一起提交到 git</strong>。于是：① 同事拉下你的代码后跑 <code>prisma migrate dev</code>，他的本地库就<strong>精确地</strong>变成和你一样的结构，不用口头同步「记得加个字段哦」；
+  ② 上线时用 <code>prisma migrate deploy</code> 把同一套迁移按顺序应用到生产库，<strong>可重复、可追溯、可回滚思考</strong>。
+  没有迁移工具的年代，改线上表结构靠手敲 SQL、靠人记，是事故高发区。
+</div>
+<div class="note">
+  <b>开发 vs 生产：</b><code>migrate dev</code> 只用于<strong>本地开发</strong>（它可能在检测到「漂移」时提示重置数据库）。
+  线上千万别用它——生产环境用 <code>npx prisma migrate deploy</code>，它只老老实实地<strong>应用</strong>已有迁移、绝不重置数据<sup><a href="#c3">3</a></sup>。这一课先把本地跑通即可。
+</div>
+
+<h2><span class="n">6</span>用 Prisma Client 跑第一个查询</h2>
+<p>
+  迁移成功的同时，Prisma 已经把 Client 生成到了你指定的 <code>src/generated/prisma</code>（第 4 节配的 <code>output</code>）。
+  现在写一段 TS 来用它。先建一个共享的 client 实例文件——<strong>这一步关乎性能，请认真看实战框</strong>。
+</p>
+<pre><code class="lang-ts">// src/db.ts —— 全项目共享的 Prisma Client 单例
+import { PrismaClient } from "./generated/prisma";  // 注意：从生成目录导入，不是 @prisma/client
+import { PrismaPg } from "@prisma/adapter-pg";
+
+// 驱动适配器：把 Prisma 接到 pg 上，读 .env 里的连接串
+const adapter = new PrismaPg({
+  connectionString: process.env.DATABASE_URL!,
+});
+
+export const prisma = new PrismaClient({ adapter });</code></pre>
+<div class="rw">🌍 <b>实战：为什么要「单例」？避免连接耗尽。</b>
+  每 <code>new PrismaClient()</code> 一次，就会开一个<strong>数据库连接池（connection pool）</strong>。
+  数据库能同时接受的连接数是<strong>有上限</strong>的（PostgreSQL 默认 100 上下）。
+  如果你在每个路由、每个请求里都 <code>new</code> 一个 Client，连接数会爆炸式增长，很快把数据库连接占满，新请求直接报「too many connections」——这是 Node + Prisma 最经典的线上事故之一<sup><a href="#c8">8</a></sup>。
+  <strong>正确做法：整个应用只创建一个 <code>prisma</code> 实例，到处 <code>import</code> 复用它。</strong> 所以我们把它单独放在 <code>src/db.ts</code> 里 <code>export</code> 出去。
+  （Prisma 官方还提示：长期运行的服务<strong>不需要</strong>每次查完手动 <code>$disconnect()</code>，那样反而因频繁重连拖慢性能<sup><a href="#c8">8</a></sup>。）
+</div>
+<div class="note">
+  <b>关于「生成目录放哪 / 要不要提交」：</b> v7 把 Client 生成到你 <code>output</code> 指定的目录（我们放在 <code>src/generated/prisma</code>），<strong>而非</strong>旧版的 <code>node_modules</code>。
+  这个目录是<strong>构建产物</strong>，通常<strong>不提交</strong>到 git（已加进 <code>.gitignore</code>）；团队成员拉代码后跑一次 <code>npx prisma generate</code> 即可重新生成。
+</div>
+
+<p>现在写一个验证脚本，把三类基本查询都跑一遍：</p>
+<pre><code class="lang-ts">// src/try-prisma.ts —— 验证脚本，跑一遍就删
+import "dotenv/config";
+import { prisma } from "./db.js";  // ESM 里相对导入要带 .js 后缀
+
+async function main() {
+  // ① create：建一个 user，再给它建一条 link（嵌套写入，一次搞定）
+  const user = await prisma.user.create({
+    data: {
+      email: "founder@linkpulse.dev",
+      links: {
+        create: [{ shortCode: "abc123", longUrl: "https://example.com/very/long" }],
+      },
+    },
+  });
+  console.log("已创建 user:", user.email);   // user.email 有补全，类型是 string
+
+  // ② findUnique：用唯一字段 shortCode 精确查一条 link
+  const link = await prisma.link.findUnique({
+    where: { shortCode: "abc123" },
+  });
+  console.log("查到 link 指向:", link?.longUrl); // 类型是 Link | null，所以用 ?.
+
+  // ③ findMany：查所有 link，并把每条所属的 owner 一起带出来
+  const all = await prisma.link.findMany({
+    include: { owner: true },     // include：把关系数据一并查出
+  });
+  console.log("共有", all.length, "条 link，第一条属于", all[0]?.owner.email);
+}
+
+main()
+  .catch((e) => { console.error(e); process.exit(1); })
+  .finally(() => prisma.$disconnect());  // 一次性脚本跑完断开是对的</code></pre>
+<p>逐个认识这三个方法（它们是每个 model 都自动拥有的 CRUD 方法<sup><a href="#c9">9</a></sup>）：</p>
+<ul>
+  <li><code>create({ data })</code>：插入一条记录。上面还演示了<strong>嵌套写入</strong>——建 user 的同时，用 <code>links: { create: [...] }</code> 顺手把它的 link 也建了，Prisma 自动把外键 <code>ownerId</code> 填对。</li>
+  <li><code>findUnique({ where })</code>：按<strong>唯一字段</strong>查<strong>一条</strong>（只能用 <code>@id</code> 或 <code>@unique</code> 字段）。查不到返回 <code>null</code>，所以 TS 类型是 <code>Link | null</code>，你必须用 <code>link?.longUrl</code> 处理空值——<strong>这正是类型安全在帮你提前想到「查不到怎么办」</strong>。</li>
+  <li><code>findMany({ ... })</code>：查<strong>多条</strong>，返回数组。<code>include: { owner: true }</code> 让它把每条 link 关联的 user 一并查出来（对应 SQL 的 JOIN），于是 <code>all[0].owner.email</code> 直接可用且有类型。</li>
+</ul>
+<p>用 <code>tsx</code> 跑这个脚本（一个直接执行 <code>.ts</code> 的运行器，比手动编译方便）：</p>
+<pre><code class="lang-bash">npm i -D tsx
+npx tsx src/try-prisma.ts</code></pre>
+<p>看到打印出 user 邮箱、link 指向和条数，说明你的代码已经<strong>真正读写到了数据库</strong>。恭喜——LinkPulse 第一次有了「会记事」的数据层。</p>
+
+<div class="rw">🌍 <b>实战：用 Prisma Studio 可视化看数据。</b>
+  脚本跑完，想<strong>亲眼</strong>确认数据进库了？不用再去敲 <code>SELECT</code>。Prisma 自带一个可视化工具：
+  <pre><code>npx prisma studio</code></pre>
+  它会在 <code>localhost:5555</code> 打开一个网页界面，像 Excel 一样浏览、筛选、增删改你的每张表<sup><a href="#c10">10</a></sup>。
+  你能直接看到刚建的 <code>User</code> / <code>Link</code> 行，点进去还能看到它们的关系。
+  日常开发里它特别适合：快速核对数据是否写对、手动造几条测试数据、给非技术同事演示。比反复手写查询语句快得多。
+</div>
+
+<h2><span class="n">7</span>小结：这一层做对了什么</h2>
+<p>你这一课为 LinkPulse 搭起了一条<strong>类型安全的数据通道</strong>：</p>
+<ul>
+  <li><b>schema.prisma</b> = 数据库结构的唯一真相来源，0013 的三张表 + 关系全在这。</li>
+  <li><b>migrate dev</b> = 把 schema 变成真实的表，并留下可提交、可协作、可上线的迁移历史。</li>
+  <li><b>Prisma Client（单例）</b> = 带补全、拼错即报错的查询入口；<code>create</code> / <code>findUnique</code> / <code>findMany</code> 覆盖了基本读写。</li>
+  <li><b>Prisma Studio</b> = 随时可视化核对数据。</li>
+</ul>
+<p>下一课（0015）我们就把这套能力接到接口上：把 Lesson 0006 那个返回「假短码」的 <code>POST /api/links</code>，改造成真正 <code>prisma.link.create(...)</code> 写库、并能查询的完整 CRUD。</p>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">Prisma / 类型安全</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">在你的 Prisma 7 项目里，把查询写成了 <code>prisma.link.findUnique({ where: { shortCdoe: "abc" } })</code>（字段名 <code>shortCode</code> 拼成了 <code>shortCdoe</code>）。会发生什么？</p>
+  <button class="opt" data-correct="true" data-ex="对！这正是 Prisma 的核心价值：Client 由 schema 自动生成，知道 Link 只有 shortCode 这个唯一字段。写错的字段名不在生成的类型里，tsc 在编译期就报错、CI 直接构建失败——事故被提前到上线前。">TypeScript 在<strong>编译期</strong>就报错，代码根本构建不过</button>
+  <button class="opt" data-correct="false" data-ex="不对。Prisma 不会「猜」你想查哪个字段，更不会拿 longUrl 去顶替。未知字段会直接被类型系统拒绝。">Prisma 会自动猜测你想查 <code>longUrl</code></button>
+  <button class="opt" data-correct="false" data-ex="这恰恰是「手写 SQL 字符串」才会有的悲剧——字符串拼错编译器看不见，要等运行时。而 Prisma 把它提前到了编译期，正是为了避免这种情况。">能正常编译，要等用户访问到那条短链、接口 500 了才发现</button>
+  <button class="opt" data-correct="false" data-ex="不对。findUnique 查不到返回的是 null，那是「字段名写对、但库里没这条记录」的情况。这里是字段名本身不存在，属于类型错误，编译就过不去。">能编译运行，只是返回 <code>null</code></button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：给 LinkPulse 接上 Prisma 数据层</h3>
+  <ol>
+    <li>在 <code>study-node</code> 根目录安装依赖：<code>npm i -D prisma</code>、<code>npm i @prisma/client @prisma/adapter-pg pg</code>、<code>npm i -D @types/pg tsx</code>。</li>
+    <li>初始化：<code>npx prisma init --datasource-provider postgresql</code>。把 <code>.env</code> 和 <code>src/generated/prisma</code> 加进 <code>.gitignore</code>。</li>
+    <li>编辑 <code>.env</code>，填上你上一课的 PostgreSQL 连接串到 <code>DATABASE_URL</code>（库名建议 <code>linkpulse</code>）。</li>
+    <li>编辑 <code>prisma/schema.prisma</code>：把 <code>generator</code> 改成 <code>provider="prisma-client"</code> 且 <code>output="../src/generated/prisma"</code>；按本课第 4 节写出 <code>User</code> / <code>Link</code> / <code>Click</code> 三个 model（含一对多关系）。</li>
+    <li>跑迁移：<code>npx prisma migrate dev --name init</code>。去 <code>prisma/migrations/</code> 打开生成的 <code>migration.sql</code> 瞄一眼那些 <code>CREATE TABLE</code>。</li>
+    <li>建 <code>src/db.ts</code>（单例，从生成目录导入 + 适配器）和 <code>src/try-prisma.ts</code>（create / findUnique / findMany 各一个），用 <code>npx tsx src/try-prisma.ts</code> 跑通，确认打印出真实数据。</li>
+    <li>最后 <code>npx prisma studio</code> 打开 <code>localhost:5555</code>，亲眼看看你刚写进去的 <code>User</code> 和 <code>Link</code> 行。</li>
+  </ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://www.prisma.io/docs/getting-started/setup-prisma/start-from-scratch/relational-databases-typescript-postgresql" target="_blank" rel="noopener">Prisma Docs · Start from scratch（PostgreSQL + TypeScript）</a>。照着官方这条 quickstart 走一遍，所有命令和文件都和本课对应。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> ① <code>npx prisma migrate dev</code> 成功的终端输出（或 <code>migrations/</code> 里生成的目录名）；② <code>npx tsx src/try-prisma.ts</code> 打印出的那几行（user 邮箱 / link 指向 / 条数）；③ 你的 <code>schema.prisma</code> 里三个 model。我会重点看你的关系字段写对没有。<br>
+<strong>下一课预告：</strong> Lesson 0015 把 Lesson 0006 的「假短码」<code>POST /api/links</code> 改造成真正写库的 CRUD——校验输入、用 <code>prisma.link.create</code> 落库、生成真短码、并实现按 code 查询与列表。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://www.prisma.io/docs/getting-started/setup-prisma/start-from-scratch/relational-databases-typescript-postgresql" target="_blank" rel="noopener">Prisma Docs · Start from scratch with PostgreSQL & TypeScript</a>（安装命令、<code>prisma init --datasource-provider</code> 及生成的文件）。</li>
+    <li id="c2"><a href="https://www.prisma.io/docs/orm/prisma-schema/overview" target="_blank" rel="noopener">Prisma Docs · Prisma schema overview</a>（schema 是配置主入口，含 datasource / generator / data model）。</li>
+    <li id="c3"><a href="https://www.prisma.io/docs/cli/migrate/dev" target="_blank" rel="noopener">Prisma Docs · prisma migrate dev</a>（检测 schema 变化、生成并应用 SQL 迁移、更新迁移历史；开发 vs deploy）。</li>
+    <li id="c4"><a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations" target="_blank" rel="noopener">Prisma Docs · Relations</a>（一对多：关系字段 + 标量外键字段 + <code>@relation(fields, references)</code>）。</li>
+    <li id="c5"><a href="https://www.prisma.io/docs/getting-started/setup-prisma/start-from-scratch/relational-databases/connect-your-database-typescript-postgresql" target="_blank" rel="noopener">Prisma Docs · Connect your database (PostgreSQL)</a>（<code>DATABASE_URL</code> 连接串格式）。</li>
+    <li id="c6"><a href="https://www.prisma.io/docs/orm/more/upgrade-guides/upgrading-versions/upgrading-to-prisma-7" target="_blank" rel="noopener">Prisma Docs · Upgrading to Prisma ORM 7</a>（v7：driver adapter 必需、<code>prisma-client</code> 生成器、从生成目录导入、连接串移至 <code>prisma.config.ts</code>）。</li>
+    <li id="c7"><a href="https://www.prisma.io/docs/orm/prisma-client/using-raw-sql/raw-queries" target="_blank" rel="noopener">Prisma Docs · Raw queries（参数化与防注入）</a>（Prisma 通过参数化查询规避 SQL 注入）。</li>
+    <li id="c8"><a href="https://www.prisma.io/docs/orm/prisma-client/setup-and-configuration/instantiate-prisma-client" target="_blank" rel="noopener">Prisma Docs · Instantiate Prisma Client</a>（应只建一个实例，避免连接池耗尽；长服务无需每次 <code>$disconnect</code>）。</li>
+    <li id="c9"><a href="https://www.prisma.io/docs/orm/prisma-client/queries/crud" target="_blank" rel="noopener">Prisma Docs · CRUD reference</a>（<code>findMany</code> / <code>findUnique</code> / <code>create</code> 等查询的 TS 示例）。</li>
+    <li id="c10"><a href="https://www.prisma.io/docs/orm/tools/prisma-studio" target="_blank" rel="noopener">Prisma Docs · Prisma Studio</a>（<code>npx prisma studio</code>，可视化浏览/编辑数据）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0014 · 上一课 <a href="0013-data-modeling.html">数据建模：把 LinkPulse 设计成表</a> · 下一课（预告）：<em>用 Prisma 实现短链 CRUD</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

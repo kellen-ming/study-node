@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0008 · 用 express.Router 拆分路由 + 分层架构</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  /* 本章专属：分层架构图 */
+  .layers{display:flex; flex-direction:column; gap:.5rem; margin:1.3rem 0; font-size:.82rem}
+  .layers .lyr{border:1px solid var(--accent); border-radius:8px; padding:.6rem .8rem; background:#fbf7ee}
+  .layers .lyr b{display:inline-block; min-width:8.5em; font-family:"SF Mono",Menlo,Consolas,monospace}
+  .layers .lyr.route{background:#eef4fb; border-color:#9cc0e8}
+  .layers .lyr.ctrl{background:#fdf2ee; border-color:#e8b29c}
+  .layers .lyr.svc{background:#eef9ef; border-color:#9cd8a3}
+  .layers .down{text-align:center; color:var(--accent); font-weight:700; font-size:1.1em; line-height:.5}
+  .layers .tag{float:right; font-size:.72rem; color:#666; font-style:italic}
+  table.flow{border-collapse:collapse; width:100%; margin:1.1rem 0; font-size:.8rem}
+  table.flow th,table.flow td{border:1px solid #ddd6c5; padding:.45rem .6rem; text-align:left; vertical-align:top}
+  table.flow th{background:#fbf7ee}
+  table.flow code{white-space:nowrap}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0008 / 阶段 2</span>
+</nav>
+
+<div class="kicker">Lesson 0008 · Node.js 后端之路</div>
+<h1>用 <code>express.Router</code> 拆分路由<br>+ 分层架构（route / controller / service）</h1>
+
+<div class="mission">
+  <b>为什么学这个？</b> 你的 <code>express-server.js</code> 现在还塞得下：几条 <code>app.get</code>、一条 <code>app.post /api/links</code>、404 兜底。
+  但 LinkPulse 真要上线收费，<strong>路由会爆炸式增长</strong>——创建短链、查列表、查详情、删除、访问统计、用户、订阅、计费回调……
+  全堆在一个文件里，会变成谁也不敢碰的「意大利面条」。
+  这一章你将学会两件让项目<strong>长期可维护</strong>的核心功夫：① 用 <code>express.Router()</code> 把路由按模块拆出去；② 把一个接口拆成 <strong>route → controller → service</strong> 三层。
+  做完，LinkPulse 的 <code>links</code> 功能就从「一坨」变成「三个各司其职、可单独测试」的文件。
+</div>
+
+<h2><span class="n">1</span>先认清痛点：单文件为什么会失控</h2>
+<p>
+  目前你的服务器大概长这样（沿用 Lesson 0006 写的假短码逻辑）：
+</p>
+<pre><code>// express-server.js —— 所有东西都挤在这里
+import express from 'express'
+const app = express()
+app.use(express.json())
+
+app.get('/', (req, res) =&gt; res.send('LinkPulse OK'))
+app.get('/greet/:name', (req, res) =&gt; res.send(`Hi ${req.params.name}`))
+
+app.post('/api/links', (req, res) =&gt; {
+  const { url } = req.body
+  // TODO 校验、TODO 生成短码、TODO 存库……全写这？
+  const code = Math.random().toString(36).slice(2, 8)
+  res.status(201).json({ code, url })
+})
+
+app.use((req, res) =&gt; res.status(404).json({ error: 'Not Found' }))
+app.listen(3000)</code></pre>
+<p>只有一个接口时它没问题。但随着功能变多，会撞上四类真实麻烦：</p>
+<ul>
+  <li><strong>文件爆炸：</strong>一个文件几百上千行，找一条路由要翻半天。</li>
+  <li><strong>职责混乱：</strong>「解析参数」「写业务规则」「拼数据库语句」「拼 HTTP 响应」全揉在一个回调里，改一处怕碰坏另一处。</li>
+  <li><strong>无法复用：</strong>「生成短码」这段逻辑，定时任务、CLI 脚本、单元测试都想用，但它被 <code>req/res</code> 绑死在路由里，拿不出来。</li>
+  <li><strong>难以测试：</strong>想测「生成短码是否 6 位」，却被迫先伪造一个 HTTP 请求——本末倒置。</li>
+</ul>
+<p>
+  解决思路是两步走，本章按顺序攻破：<strong>(A) 横向拆</strong>——把同一类路由（比如所有 <code>links</code> 接口）抽成一个独立路由模块；<strong>(B) 纵向拆</strong>——把单个接口按职责切成 route / controller / service 三层。
+</p>
+<div class="note">
+  💡 提醒：从 Lesson 0010 起项目会迁到 TypeScript。本章先用你已经熟悉的 <strong>ESM JavaScript（<code>import</code>/<code>export</code>）</strong> 把<strong>结构思想</strong>讲透；结构一旦学会，换成 <code>.ts</code> 只是加类型标注，骨架完全一样。
+</div>
+
+<h2><span class="n">2</span>横向拆：<code>express.Router()</code> 是什么</h2>
+<p>
+  <strong>定义（后端新概念）：</strong>官方说 <code>express.Router()</code> 创建出的 <code>router</code> 对象，是「<em>一个由中间件和路由组成的实例</em>」，你可以把它<strong>当成一个「迷你 App（mini-application）」</strong>——它能做的事就两样：跑中间件、做路由匹配<sup><a href="#c1">1</a></sup><sup><a href="#c2">2</a></sup>。
+</p>
+<p>
+  <strong>类比：</strong>把主 <code>app</code> 想成<strong>公司总机</strong>，每个 <code>Router</code> 是一个<strong>部门分机组</strong>。总机不需要知道「市场部内部怎么转接」，只要把「拨 1 字头的电话」整体甩给市场部那台分机即可。同理，主 App 只需说一句「凡是 <code>/api/links</code> 开头的请求，全交给 links 路由处理」，至于 links 内部有多少条子路由，主文件一概不管。
+</p>
+<p>关键在于：<strong>Router 本身就是一个中间件</strong>，所以它能被 <code>app.use()</code> 挂载<sup><a href="#c2">2</a></sup>。官方 birds 示例的精髓如下：</p>
+
+<div class="cmp">
+  <div>
+    <h4>birds.js（一个路由模块）</h4>
+<pre><code>import express from 'express'
+const router = express.Router()
+
+// 这个中间件只对本路由生效
+router.use((req, res, next) =&gt; {
+  console.log('Time:', Date.now())
+  next()
+})
+
+router.get('/', (req, res) =&gt;
+  res.send('Birds home page'))
+router.get('/about', (req, res) =&gt;
+  res.send('About birds'))
+
+export default router</code></pre>
+  </div>
+  <div>
+    <h4>app.js（主文件挂载它）</h4>
+<pre><code>import express from 'express'
+import birds from './birds.js'
+
+const app = express()
+
+// 挂在 /birds 前缀下
+app.use('/birds', birds)
+
+app.listen(3000)</code></pre>
+  </div>
+</div>
+<p>
+  挂载后，App 会处理 <code>/birds</code> 和 <code>/birds/about</code> 两个地址<sup><a href="#c1">1</a></sup>。注意一个<strong>极易踩的坑</strong>👇
+</p>
+<div class="rw">
+  🌍 <b>实战：前缀只写一次，子路由写「相对路径」。</b> 上面 <code>router.get('/about', …)</code> 写的是 <code>'/about'</code>，<strong>不是</strong> <code>'/birds/about'</code>。因为 <code>app.use('/birds', birds)</code> 已经把 <code>/birds</code> 这段前缀「吃掉」了——官方原话：挂载路径会在请求传给该中间件前<strong>被剥离（stripped）</strong><sup><a href="#c2">2</a></sup>。新手常犯的错是在子路由里把前缀又写一遍，结果接口变成 <code>/birds/birds/about</code> 死活访问不到。<strong>口诀：前缀归 <code>app.use</code> 管，路径细节归 <code>router</code> 管。</strong>
+</div>
+
+<h3 style="font-size:1.05rem;margin-top:1.4rem">把它套到 LinkPulse</h3>
+<p>我们把所有 <code>links</code> 接口搬进一个 <code>linksRouter</code>，主文件只剩一行挂载：</p>
+<pre><code>// routes/links.routes.js
+import express from 'express'
+const router = express.Router()
+
+router.post('/', (req, res) =&gt; { /* 创建短链 */ })
+router.get('/',  (req, res) =&gt; { /* 列表    */ })
+router.get('/:code', (req, res) =&gt; { /* 查详情 */ })
+
+export default router</code></pre>
+<pre><code>// express-server.js（主文件，瞬间清爽）
+import express from 'express'
+import linksRouter from './routes/links.routes.js'
+
+const app = express()
+app.use(express.json())
+
+app.use('/api/links', linksRouter)   // ← 一行接管所有 links 接口
+app.use((req, res) =&gt; res.status(404).json({ error: 'Not Found' }))
+app.listen(3000)</code></pre>
+<p class="note">
+  💡 <code>router.post('/', …)</code> 配合 <code>app.use('/api/links', …)</code>，最终命中的就是 <code>POST /api/links</code>；<code>router.get('/:code', …)</code> 就是 <code>GET /api/links/:code</code>。<strong>前缀 + 相对路径 = 完整路径。</strong>
+</p>
+
+<h2><span class="n">3</span>纵向拆：route → controller → service 三层</h2>
+<p>
+  光把路由挪个文件还不够——<code>router.post('/', …)</code> 的回调里如果继续塞「校验 + 生成短码 + 存库 + 拼响应」，那只是把意大利面条<strong>换了个盘子</strong>。真正的功夫是<strong>分层（Layered Architecture）</strong>：把一个请求的处理过程，按「关注点」切成三段独立的代码。
+</p>
+
+<div class="layers">
+  <div class="lyr route"><b>route 路由层</b> 只声明「什么方法 + 什么路径 → 交给哪个 controller」。<span class="tag">认路的</span></div>
+  <div class="down">▼</div>
+  <div class="lyr ctrl"><b>controller 控制器</b> 只跟 HTTP 打交道：从 <code>req</code> 取数据、调 service、把结果塞进 <code>res</code>。<span class="tag">接待员</span></div>
+  <div class="down">▼</div>
+  <div class="lyr svc"><b>service 服务层</b> 纯业务逻辑，<strong>完全不碰 <code>req</code>/<code>res</code></strong>，只接收普通参数、返回普通值/抛错。<span class="tag">真正干活的</span></div>
+</div>
+
+<p><strong>每一层到底负责什么、不负责什么</strong>——这张表是本章的核心，建议记牢：</p>
+<table class="flow">
+  <tr><th>层</th><th>它<strong>该</strong>做</th><th>它<strong>绝不</strong>做</th></tr>
+  <tr>
+    <td><b>route</b></td>
+    <td>定义路径与 HTTP 方法，把请求路由到 controller 函数</td>
+    <td>不写业务、不读 <code>req.body</code>、不发响应</td>
+  </tr>
+  <tr>
+    <td><b>controller</b></td>
+    <td>从 <code>req</code> 取参数 → 调 service → 决定状态码 → <code>res.json()</code> 返回</td>
+    <td>不写核心业务规则（短码怎么生成、怎么算重复）</td>
+  </tr>
+  <tr>
+    <td><b>service</b></td>
+    <td>核心业务：生成短码、校验唯一性、（以后）读写数据库</td>
+    <td><strong>不引入 express、不碰 <code>req</code>/<code>res</code>、不关心 HTTP 状态码</strong></td>
+  </tr>
+</table>
+
+<p>
+  <strong>类比：餐厅。</strong> route 是<strong>门口的指示牌</strong>（「点餐请往里走」）；controller 是<strong>服务员</strong>——接你的单、把菜端给你，但不下厨；service 是<strong>后厨</strong>——只管按菜谱做菜，根本不知道前厅长什么样、客人坐几号桌。后厨（service）不依赖前厅（HTTP），所以同一个后厨可以同时给堂食、外卖、自助餐厅供菜。
+</p>
+
+<div class="rw">
+  🌍 <b>实战金句：薄控制器，厚服务（thin controller, fat service）。</b> 业界公认的好结构是——controller 越薄越好，理想状态只有「取参数 → 调 service → 返回」三行；真正的重量级逻辑全沉到 service 里<sup><a href="#c3">3</a></sup><sup><a href="#c4">4</a></sup>。判断标准很简单：<strong>如果哪天你想从 Express 换成别的框架（Fastify、Koa），service 层应该一行都不用改</strong>——因为它根本不知道 Express 的存在。controller 才是那层「HTTP 适配器」。
+</div>
+
+<h2><span class="n">4</span>为什么值得这么麻烦：关注点分离（SoC）</h2>
+<p>
+  「<strong>关注点分离</strong>（Separation of Concerns, SoC）」是软件工程的一条基本原则：<strong>把因不同原因而变化的代码分开放</strong>。HTTP 协议怎么收发（controller 关注）和「短码业务规则」（service 关注）是两件会<strong>各自独立演进</strong>的事——它们凭什么要纠缠在同一个函数里？拆开后你立刻收获三样东西：
+</p>
+<ul>
+  <li><strong>可测试（testable）：</strong>service 是个普通函数，输入参数、输出结果。测「生成的短码是 6 位」直接 <code>createLink({url})</code> 调一下断言即可，<strong>不用启动服务器、不用伪造 HTTP 请求</strong>。这是分层最大的红利<sup><a href="#c3">3</a></sup>。</li>
+  <li><strong>可维护（maintainable）：</strong>改业务规则只动 service，改响应格式/状态码只动 controller，改路径只动 route。<strong>改动半径小 = 不容易误伤</strong>。</li>
+  <li><strong>可复用（reusable）：</strong>同一个 <code>createLink()</code>，HTTP 接口能用，「批量导入 CSV 的脚本」「定时清理任务」也能用——因为它不绑 HTTP<sup><a href="#c4">4</a></sup>。</li>
+</ul>
+<div class="rw">
+  🌍 <b>实战：真实 Node 项目的目录长这样。</b> 几乎所有成熟的 Express 项目都会有这套分层目录，新人一看就懂去哪找代码：
+  <div class="tree" style="margin-top:.6rem">src/
+├─ express-server.js      # 创建 app、挂中间件、挂各路由
+├─ routes/
+│   └─ links.routes.js    # 只声明 /api/links 下的路径
+├─ controllers/
+│   └─ links.controller.js# 取 req、调 service、发 res
+└─ services/
+    └─ links.service.js   # 纯业务，不依赖 express ★最值钱</div>
+  关键信号：<strong><code>services/</code> 里的文件不应该出现 <code>import express</code></strong>。哪天你在 service 里看到 <code>req</code> 或 <code>res</code>，就是分层漏水了，得堵回去。
+</div>
+
+<h2><span class="n">5</span>动手重构 LinkPulse：三个文件落地</h2>
+<p>下面把 <code>links</code> 完整拆成三层。<strong>从下往上看</strong>（先看最纯的 service，再看 controller，最后看 route），最符合数据流向的理解顺序。</p>
+
+<h3 style="font-size:1.05rem;margin-top:1.2rem">① service —— 纯业务，零 Express</h3>
+<pre><code>// src/services/links.service.js
+// 注意：整个文件没有 import express，也没有 req / res
+const store = new Map()   // 临时内存「数据库」，第 11 课换成真 DB
+
+function generateCode() {
+  return Math.random().toString(36).slice(2, 8)  // 6 位随机短码
+}
+
+// 输入普通对象，返回普通对象 —— 像数学函数一样可预测
+export function createLink({ url }) {
+  const code = generateCode()
+  const link = { code, url, createdAt: new Date().toISOString() }
+  store.set(code, link)
+  return link
+}
+
+export function findByCode(code) {
+  return store.get(code) ?? null
+}
+
+export function listLinks() {
+  return [...store.values()]
+}</code></pre>
+
+<h3 style="font-size:1.05rem;margin-top:1.2rem">② controller —— 只做 HTTP 翻译</h3>
+<pre><code>// src/controllers/links.controller.js
+import * as linksService from '../services/links.service.js'
+
+export function create(req, res) {
+  const { url } = req.body              // 1) 从 HTTP 请求取数据
+  const link = linksService.createLink({ url })  // 2) 调 service 干活
+  res.status(201).json(link)            // 3) 把结果翻译成 HTTP 响应
+}
+
+export function getOne(req, res) {
+  const link = linksService.findByCode(req.params.code)
+  if (!link) return res.status(404).json({ error: 'Link not found' })
+  res.json(link)
+}
+
+export function list(req, res) {
+  res.json(linksService.listLinks())
+}</code></pre>
+<p class="note">
+  💡 看见没？每个 controller 几乎都是「取参数 → 调 service → 发响应」三步——这就是<strong>薄控制器</strong>。它<strong>只</strong>懂 HTTP（状态码 201/404、<code>req.body</code>、<code>req.params</code>），<strong>不</strong>懂短码怎么生成。
+</p>
+
+<h3 style="font-size:1.05rem;margin-top:1.2rem">③ route —— 只声明路径</h3>
+<pre><code>// src/routes/links.routes.js
+import express from 'express'
+import * as linksController from '../controllers/links.controller.js'
+
+const router = express.Router()
+
+router.post('/',      linksController.create)   // POST /api/links
+router.get('/',       linksController.list)     // GET  /api/links
+router.get('/:code',  linksController.getOne)   // GET  /api/links/:code
+
+export default router</code></pre>
+<p>
+  这里有个<strong>容易忽略的细节</strong>：传给 <code>router.post('/', linksController.create)</code> 的是 <strong>函数本身（<code>create</code>，不带括号）</strong>，不是 <code>create()</code>。我们把函数<strong>交给</strong> Express，等请求真正来了，Express 才会用 <code>(req, res)</code> 调用它。写成 <code>create()</code> 会立刻执行、传错东西。
+</p>
+
+<h3 style="font-size:1.05rem;margin-top:1.2rem">④ 主文件 —— 组装</h3>
+<pre><code>// src/express-server.js
+import express from 'express'
+import linksRouter from './routes/links.routes.js'
+
+const app = express()
+app.use(express.json())                 // 全局：解析 JSON 请求体
+app.use('/api/links', linksRouter)      // 挂载 links 模块
+app.use((req, res) =&gt; res.status(404).json({ error: 'Not Found' }))
+
+app.listen(3000, () =&gt; console.log('LinkPulse on :3000'))</code></pre>
+
+<p>整条调用链一目了然——<strong>一个 POST 请求是这样流过三层的：</strong></p>
+<table class="flow">
+  <tr><th>步骤</th><th>发生了什么</th><th>在哪一层</th></tr>
+  <tr><td>1</td><td><code>POST /api/links</code> 进来，<code>express.json()</code> 解析出 <code>req.body</code></td><td>主文件中间件</td></tr>
+  <tr><td>2</td><td><code>app.use('/api/links', …)</code> 剥掉前缀，把 <code>/</code> 交给 linksRouter</td><td>route</td></tr>
+  <tr><td>3</td><td><code>router.post('/', …)</code> 命中，调用 <code>create(req, res)</code></td><td>route → controller</td></tr>
+  <tr><td>4</td><td>controller 取出 <code>req.body.url</code>，调 <code>createLink({url})</code></td><td>controller → service</td></tr>
+  <tr><td>5</td><td>service 生成短码、存进 Map、<code>return</code> 新链接对象</td><td>service</td></tr>
+  <tr><td>6</td><td>controller 拿到对象，<code>res.status(201).json(link)</code> 返回</td><td>controller</td></tr>
+</table>
+<div class="note">
+  💡 你可能注意到 controller 里还没做 <strong>url 校验</strong>（空值、非法格式）。那是<strong>上一课</strong>（Lesson 0007 校验与错误处理）的主题——通常以中间件形式插在 controller<strong>之前</strong>，或在 service 里抛业务错误。本章先专注「结构」，校验逻辑你已经会写，正好回填进这套分层里。
+</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">分层架构</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">在 route / controller / service 三层结构里，下面哪段代码<strong>绝对不应该</strong>出现在 <code>service</code> 层？</p>
+  <button class="opt" data-correct="true" data-ex="service 是纯业务层，必须完全不依赖 HTTP。一旦它读 req.body / 发 res，就被 Express 绑死，无法被脚本或单测复用，也就失去了分层的全部意义。">
+    <code>res.status(201).json(link)</code> —— 直接给 HTTP 响应写状态码和 body
+  </button>
+  <button class="opt" data-correct="false" data-ex="生成短码正是 service 的核心业务逻辑，理应放在这里。">
+    <code>Math.random().toString(36).slice(2, 8)</code> —— 生成短码
+  </button>
+  <button class="opt" data-correct="false" data-ex="存数据（这里是 Map，将来是数据库）属于业务/数据操作，放在 service 完全正确。">
+    <code>store.set(code, link)</code> —— 把新链接存进数据
+  </button>
+  <button class="opt" data-correct="false" data-ex="返回一个普通对象正是 service 的标准做法——输入参数、输出值，像纯函数一样。">
+    <code>return { code, url }</code> —— 返回一个普通对象
+  </button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：把 links 拆成 routes + controller + service 三个文件</h3>
+  <ol>
+    <li>在项目里新建目录：<code>src/routes</code>、<code>src/controllers</code>、<code>src/services</code>。</li>
+    <li>创建 <code>src/services/links.service.js</code>，写 <code>createLink</code>、<code>findByCode</code>、<code>listLinks</code> 三个函数，用一个 <code>Map</code> 当临时存储。<strong>确认整个文件没有 <code>import express</code>。</strong></li>
+    <li>创建 <code>src/controllers/links.controller.js</code>，写 <code>create</code> / <code>getOne</code> / <code>list</code> 三个函数，<code>import * as linksService</code> 来调用上一步。</li>
+    <li>创建 <code>src/routes/links.routes.js</code>，用 <code>express.Router()</code> 把三个路径接到对应 controller 函数，<code>export default router</code>。</li>
+    <li>改造主文件 <code>express-server.js</code>：删掉原来那条 <code>app.post('/api/links', …)</code>，换成一行 <code>app.use('/api/links', linksRouter)</code>。</li>
+    <li>用 <code>npm run dev</code> 启动，挨个验证：
+      <ul>
+        <li><code>curl -X POST localhost:3000/api/links -H "Content-Type: application/json" -d '{"url":"https://example.com"}'</code> → 应返回 201 + 含 <code>code</code> 的 JSON</li>
+        <li>把返回的 code 填进 <code>curl localhost:3000/api/links/那个code</code> → 应返回该链接</li>
+        <li><code>curl localhost:3000/api/links</code> → 应返回数组</li>
+        <li><code>curl localhost:3000/api/links/nope</code> → 应返回 404</li>
+      </ul>
+    </li>
+    <li><strong>体会复用：</strong>临时在主文件最上方加一行 <code>import * as svc from './services/links.service.js'</code> 再 <code>console.log(svc.createLink({url:'https://test.com'}))</code>，启动看终端——你<strong>没经过任何 HTTP</strong> 就用上了业务逻辑。验证完记得删掉这行。</li>
+  </ol>
+</div>
+
+<div class="src">
+  📖 <strong>本课首选精读源</strong>：<a href="https://expressjs.com/en/guide/routing.html" target="_blank" rel="noopener">Express 官方 Routing 指南</a> —— 重点读其中「<em>express.Router</em>」一节的 birds.js 例子，理解「创建 router → 加路由/中间件 → <code>app.use</code> 挂载」三步。
+</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑通后发我：</b>① 你的 <code>src/</code> 目录树截图或文字；② 四条 <code>curl</code> 的返回结果；③ 用你自己的话回答——「为什么 service 层不能出现 <code>res.json()</code>？」
+  <br><strong>下一课预告：</strong>Lesson 0009 配置与日志——把写死的 <code>3000</code> 端口、（未来的）数据库连接串等抽进环境变量与配置模块，并给 LinkPulse 接上像样的请求日志，让它具备「能部署到不同环境」的雏形。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://expressjs.com/en/guide/routing.html" target="_blank" rel="noopener">Express — Routing 指南</a>（官方对 <code>express.Router</code> 的定义「a complete middleware and routing system」、mini-app 说法，以及 birds.js 模块化 + <code>app.use('/birds', …)</code> 挂载示例）。</li>
+    <li id="c2"><a href="https://expressjs.com/en/5x/api/router/" target="_blank" rel="noopener">Express 5.x API — Router</a>（router 对象定义、<code>router.METHOD</code>/<code>router.use</code>/<code>router.route</code> 等方法，及「挂载路径会被剥离 stripped」的行为说明）。</li>
+    <li id="c3"><a href="https://www.coreycleary.me/why-should-you-separate-controllers-from-services-in-node-rest-apis" target="_blank" rel="noopener">Corey Cleary — Why separate Controllers from Services</a>（controller 处理 HTTP、service 处理业务；分层带来可测试、薄控制器的论证）。</li>
+    <li id="c4"><a href="https://www.infoq.com/articles/separation-concerns-nodejs" target="_blank" rel="noopener">InfoQ — Separation of Concerns in Node.js</a>（把业务逻辑移出 Express 路由、用 service 层提升可复用与可维护性）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0008 · 上一课 <a href="0007-validation-error-handling.html">校验与错误处理</a> · 下一课（预告）：<em>配置与日志（环境变量 + 请求日志）</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

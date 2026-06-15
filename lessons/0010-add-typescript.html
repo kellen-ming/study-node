@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0010 · 给项目加上 TypeScript（TS 正式上场）</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：迁移前后对照 & TS 速查小表，只在本页用 */
+.tstable{width:100%;border-collapse:collapse;font-size:.82rem;margin:.8rem 0}
+.tstable th,.tstable td{border:1px solid var(--rule);padding:.4rem .55rem;text-align:left;vertical-align:top}
+.tstable th{background:var(--code-bg);font-weight:600}
+.tstable td code{font-size:.92em}
+.badmark{color:var(--no);font-weight:600}
+.okmark{color:var(--ok);font-weight:600}
+.flow{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.8rem;background:var(--code-bg);
+  border:1px solid var(--rule);border-radius:5px;padding:.7rem .9rem;margin:.8rem 0;line-height:1.7}
+.flow b{color:var(--accent)}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0010 / 阶段 2</span></nav>
+<div class="kicker">Lesson 0010 · Node.js 后端之路</div>
+<h1>给项目加上 TypeScript（TS 正式上场）</h1>
+
+<div class="mission">
+<b>为什么学这个？</b> 到目前为止 LinkPulse 全是 <code>.js</code>：你写过 <code>req.body.url</code>、写过 controller / service 分层、用 zod 校验过输入——但编辑器一直「半瞎」，拼错字段名、把字符串当数字用，都要等运行起来报错才发现（还记得 0009 那个忘记声明就用的变量 bug 吗？）。本章我们让 <b>TypeScript（TS，给 JS 加上「类型」的超集语言）</b>正式上场：装好工具链、写好 <code>tsconfig.json</code>、把现有文件从 <code>.js</code> 改成 <code>.ts</code>，并给 Express 的 <code>req</code>/<code>res</code> 标注类型。<b>从这一章起，LinkPulse 的所有代码都用 TypeScript 写</b>——这正是现代 Node 后端的主流做法，也是你未来面试和上线收费 SaaS 时的标配。</div>
+
+<h2><span class="n">1</span>TypeScript 是什么？为什么后端值得用</h2>
+
+<p><b>定义。</b> TypeScript 是微软开发的、JavaScript 的一个<b>超集（superset）</b>：任何合法的 JS 都是合法的 TS，但 TS 额外允许你给变量、参数、返回值<b>标注类型（type annotation）</b>。浏览器和 Node 都<b>不直接认识</b> TS——它必须先被「去掉类型」变回普通 JS 才能运行。所以 TS 本质是一个<b>开发期的工具</b>：在你写代码时帮你查错，在交付前消失。<sup><a href="#c1">1</a></sup></p>
+
+<p><b>类比。</b> 把 JS 想成「口头约定」：你说「这个函数收一个 URL」，但没人拦着别人传个数字进去。TS 是「写进合同的字段」：参数写明 <code>url: string</code>，谁要传数字，编辑器当场红线警告，编译时直接拒绝。合同不改变程序运行时的行为，但能在签字（部署）之前把扯皮挡掉。</p>
+
+<p>作为一个前端工程师，你大概率已经在 React 项目里见过 TS。这里只点明它在<b>后端</b>语境下凭什么值得你认真投入：</p>
+
+<ul>
+<li><b>类型安全（type safety）。</b> 后端处理的是<b>外部不可信数据</b>：HTTP 请求体、数据库行、第三方 API 返回。一个字段名写错（<code>req.body.ur</code>）、一个该是数字的字段当字符串拼接，在 JS 里要等到线上用户触发那条路径才崩。TS 在你敲代码的瞬间就告诉你。</li>
+<li><b>编辑器自动补全（autocomplete）。</b> 当 <code>req</code> 有了类型，敲 <code>req.</code> 编辑器会列出 <code>body</code> / <code>params</code> / <code>query</code> / <code>headers</code>……你不用再翻文档猜字段名。这对后端尤其值钱——Express、数据库客户端的 API 面非常大。</li>
+<li><b>自文档（self-documenting）。</b> 一个写着 <code>function createLink(input: CreateLinkInput): Promise&lt;Link&gt;</code> 的函数，光看签名就知道吃什么、吐什么。半年后的你（和接手的同事）不必读实现就能用对。</li>
+<li><b>重构友好（refactor-safe）。</b> SaaS 是要长期维护的。当你把 <code>Link</code> 接口里的 <code>shortCode</code> 改名为 <code>slug</code>，TS 会把项目里每一处用到旧名字的地方标红——漏改一个都过不了编译。在纯 JS 里，这种改名只能靠全局搜索 + 祈祷。</li>
+</ul>
+
+<div class="rw">🌍 <b>实战：</b>现代 Node 后端的事实标准就是 TypeScript。NestJS（企业级 Node 框架）默认 TS；Prisma、Drizzle 等主流 ORM 把「类型安全」当成头号卖点；几乎所有正经招聘的「Node 后端」岗位都默认你写 TS。你做 LinkPulse 这种要上线收费的项目，用 TS 不是「加分项」，而是<b>基本盘</b>——它直接决定了你迭代订阅、计费这些核心逻辑时，敢不敢大胆改代码。</div>
+
+<h2><span class="n">2</span>安装工具链：typescript、tsx、@types/*</h2>
+
+<p>在 <code>study-node</code> 根目录（就是有 <code>package.json</code> 那一层）执行：</p>
+
+<pre><code>npm i -D typescript tsx @types/node @types/express</code></pre>
+
+<p><code>-D</code> 是 <code>--save-dev</code> 的简写，把它们装进 <code>devDependencies</code>（开发期依赖）。这点你在前端已熟：这些工具只在<b>写代码 / 构建</b>时需要，部署运行后的纯 JS 不依赖它们。逐个说清每个包是干嘛的：</p>
+
+<table class="tstable">
+<tr><th>包</th><th>作用</th></tr>
+<tr><td><code>typescript</code></td><td>TS 编译器本体，提供 <code>tsc</code> 命令——把 <code>.ts</code> 翻译成 <code>.js</code>，并做<b>类型检查</b>。</td></tr>
+<tr><td><code>tsx</code></td><td>开发期的「直接运行器」：让 Node 不用先编译就能跑 <code>.ts</code> 文件（下一节细讲）。<sup><a href="#c2">2</a></sup></td></tr>
+<tr><td><code>@types/node</code></td><td>Node.js 内置 API（<code>process</code>、<code>fs</code>、<code>Buffer</code>……）的<b>类型声明</b>。Node 本身是用 JS 写的，没带类型，靠这个包补上。</td></tr>
+<tr><td><code>@types/express</code></td><td>Express 的类型声明，让 <code>req</code>/<code>res</code> 这些有类型、能自动补全。</td></tr>
+</table>
+
+<p><b>新概念：<code>@types/*</code> 是什么？</b> 很多 npm 库（包括 Express）本身是用纯 JS 写的，<b>不自带类型信息</b>。社区维护了一个叫 <b>DefinitelyTyped</b> 的巨型仓库，专门为这些 JS 库补写「类型声明文件」（<code>.d.ts</code>，只描述「长什么样」、不含实现），发布成 <code>@types/库名</code> 这种包。装上它，TS 就「认识」这个 JS 库了。<sup><a href="#c3">3</a></sup></p>
+
+<div class="note"><b>怎么判断要不要装 @types？</b> 先直接 <code>import</code> 用。如果库<b>自带</b>类型（像 zod、Prisma，包里就有 <code>.d.ts</code>），就什么都不用装；如果 TS 报 <code>Could not find a declaration file for module 'xxx'</code>，再去装对应的 <code>@types/xxx</code>。Express 属于后者，所以这里要装 <code>@types/express</code>。</div>
+
+<div class="rw">🌍 <b>实战：<code>@types/*</code> 生态是 TS 能落地的关键。</b> 正因为 DefinitelyTyped 几乎覆盖了所有老牌 JS 库，你才能在一个 TS 项目里自由混用「祖传 JS 库」而不失去类型。看一个库 TS 支持好不好，老手会先看：① 是否自带类型（最佳）；② 没有的话 <code>@types/</code> 有没有、新不新。这是选型时的真实考量。</div>
+
+<h2><span class="n">3</span><code>tsconfig.json</code>：告诉编译器怎么干活</h2>
+
+<p><b>新概念。</b> <code>tsconfig.json</code> 是 TS 项目的「配置中枢」——只要某个目录里有它，TS 就把这个目录认作一个项目，并按里面的规则来检查和编译。<sup><a href="#c1">1</a></sup> 你可以手敲，也可以用 <code>npx tsc --init</code> 生成一份带超多注释的默认版。这里我们手写一份贴合 LinkPulse 的精简配置。在根目录新建 <code>tsconfig.json</code>：</p>
+
+<pre><code>{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"]
+}</code></pre>
+
+<p>逐项用大白话解释最关键的几个（其余几个看下方提示）：</p>
+
+<table class="tstable">
+<tr><th>选项</th><th>通俗解释</th></tr>
+<tr><td><code>target</code></td><td>编译产物用<b>哪个版本的 JS 语法</b>。我们写 <code>ES2022</code>：现代 Node（18+）原生支持，能直接用 <code>async/await</code>、可选链 <code>?.</code> 等新语法，不必降级成一堆老旧代码。<sup><a href="#c4">4</a></sup></td></tr>
+<tr><td><code>module</code></td><td>编译产物用<b>哪种模块系统</b>。你的项目 <code>package.json</code> 里写了 <code>"type":"module"</code>（ESM），所以选 <code>NodeNext</code>——它让 TS 完全按 Node 的现代模块规则来处理 <code>import</code>/<code>export</code>。<sup><a href="#c5">5</a></sup></td></tr>
+<tr><td><code>moduleResolution</code></td><td>TS 用什么策略去「找到」你 import 的文件/包。配 <code>module:NodeNext</code> 时就该配 <code>NodeNext</code>，两者成套出现。<sup><a href="#c5">5</a></sup></td></tr>
+<tr><td><code>strict</code></td><td><b>本章重点。</b> 一个总开关，打开一整套最严格的类型检查。强烈建议 <code>true</code>（下一节专门讲它帮你抓的 bug）。<sup><a href="#c6">6</a></sup></td></tr>
+<tr><td><code>rootDir</code></td><td>源码的<b>根目录</b>。我们规定所有 <code>.ts</code> 放在 <code>src/</code> 里。它决定编译时「从哪个前缀开始算相对路径」。<sup><a href="#c7">7</a></sup></td></tr>
+<tr><td><code>outDir</code></td><td>编译出来的 <code>.js</code> <b>放到哪</b>。我们放 <code>dist/</code>。配合 <code>rootDir</code>：<code>src/app.ts</code> → <code>dist/app.js</code>，目录结构原样镜像。<sup><a href="#c7">7</a></sup></td></tr>
+</table>
+
+<div class="note"><b>另外三个一句话过：</b> <code>esModuleInterop: true</code> 让 <code>import express from 'express'</code> 这种「默认导入」写法对 CommonJS 老库也好用（不写它有时得用别扭的 <code>import * as</code>）；<code>skipLibCheck: true</code> 跳过对第三方 <code>.d.ts</code> 的类型检查，显著加快编译、避开别人库里的类型噪声；<code>sourceMap: true</code> 生成「源码地图」，让运行编译后的 JS 报错时，行号能映射回你的 <code>.ts</code> 源码，方便调试。</div>
+
+<p><code>include</code> 在 <code>compilerOptions</code> 之外，告诉 TS<b>把哪些文件纳入这个项目</b>——这里是 <code>src/</code> 下所有 <code>.ts</code>。（注意：<code>rootDir</code> 不负责挑文件，它只管编译时的路径前缀；挑文件是 <code>include</code> 的活儿。<sup><a href="#c7">7</a></sup>）</p>
+
+<div class="task" style="margin:1rem 0">
+<h3>⌨️ 顺手做：建好目录骨架</h3>
+<ol>
+<li>在根目录新建文件夹 <code>src/</code>，等下我们把代码搬进去。</li>
+<li>把上面的 <code>tsconfig.json</code> 写进根目录。</li>
+<li>在 <code>.gitignore</code> 里加一行 <code>dist</code>（编译产物不进 git，和 <code>node_modules</code> 同理）。</li>
+</ol>
+</div>
+
+<h2><span class="n">4</span>两种「运行 TS」的方式：开发用 tsx，生产用 tsc</h2>
+
+<p>Node 不直接认识 <code>.ts</code>（虽然新版 Node 有实验性的「类型剥离」，但默认仍不开启、且不做类型检查<sup><a href="#c2">2</a></sup>）。所以我们要在「写代码时怎么跑」和「上线时怎么跑」之间做选择。先把两种心智模型摆清楚：</p>
+
+<div class="cmp">
+<div>
+<h4>开发期 · tsx（直接跑）</h4>
+<pre><code># 跑一次
+npx tsx src/app.ts
+
+# 改文件自动重启
+npx tsx watch src/app.ts</code></pre>
+<p style="font-size:.82rem;margin:.4rem 0 0"><code>tsx</code> 底层用 <b>esbuild</b>（一个用 Go 写的超快转译器）把 <code>.ts</code> 即时转成 JS 再交给 Node 跑，几乎无感、无需先编译。<b>但它为了快，<span class="badmark">不做类型检查</span></b>——类型错了照样跑。<sup><a href="#c2">2</a></sup></p>
+</div>
+<div>
+<h4>生产期 · tsc（先编译）</h4>
+<pre><code># 把 src/ 编译到 dist/
+npx tsc
+
+# 用纯 Node 跑产物
+node dist/app.js</code></pre>
+<p style="font-size:.82rem;margin:.4rem 0 0"><code>tsc</code> 会<b><span class="okmark">完整做类型检查</span></b>，类型不过就拒绝出产物。上线跑的是 <code>dist/</code> 里的<b>纯 JS</b>，运行环境里压根不需要 TS。这就是「TS 是开发期工具」的含义。</p>
+</div>
+</div>
+
+<p><b>为什么要分两套？</b> 一句话：<b>开发图快、上线图稳</b>。开发时你每改一行都想立刻看到效果，<code>tsx watch</code> 用 esbuild 做到「保存即重启」，体验和你前端的热更新很像；上线时你要的是一份不依赖任何 TS 工具、且<b>经过类型检查保证过</b>的 JS。</p>
+
+<div class="note"><b>关键提醒：tsx 不查类型 ≠ 你可以不查类型。</b> Node 官方文档明确建议：用 tsx 这类运行器开发时，<b>另外用 <code>tsc</code> 做一次类型检查再交付</b>。<sup><a href="#c2">2</a></sup> 实操上常加一个 <code>"typecheck": "tsc --noEmit"</code> 脚本（<code>--noEmit</code> = 只检查、不生成文件），CI/提交前跑一下。编辑器（VS Code）里那些红线，本质也是在帮你实时做这件事。</p></div>
+
+<p>现在把这些固化进 <code>package.json</code> 的 <code>scripts</code>。打开根目录 <code>package.json</code>，把 <code>scripts</code> 改成（注意路径已指向 <code>src/</code>，入口文件名按你的实际情况，下一节我们就建 <code>src/app.ts</code>）：</p>
+
+<pre><code>"scripts": {
+  "dev": "tsx watch src/app.ts",
+  "build": "tsc",
+  "start": "node dist/app.js",
+  "typecheck": "tsc --noEmit"
+}</code></pre>
+
+<p>四个脚本的分工：<code>npm run dev</code> 开发（自动重启）；<code>npm run typecheck</code> 查类型；<code>npm run build</code> 编译出 <code>dist/</code>；<code>npm start</code> 跑生产产物。从今往后，开发 LinkPulse 你只需 <code>npm run dev</code>。</p>
+
+<div class="rw">🌍 <b>实战：<code>tsx watch</code> 是当下最舒服的 Node+TS 开发姿势。</b> 它取代了老牌组合 <code>ts-node</code> + <code>nodemon</code>。区别要知道：<code>ts-node</code> 默认<b>会</b>做类型检查，所以启动慢、改一下要等；<code>tsx</code> 走 esbuild、<b>不</b>查类型，所以飞快，把「类型检查」这件事交给编辑器和 <code>tsc</code> 专门去做。<sup><a href="#c2">2</a></sup> 职责分离，体验更顺——这也是新项目越来越多选 tsx 的原因。</div>
+
+<h2><span class="n">5</span>TS 基础回顾（只讲本章用得到的）</h2>
+
+<p>下面这几样是给 Express 和 LinkPulse 数据结构标类型的最小够用集合。循序渐进，每个都给定义 + 例子。</p>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .3rem">① 类型注解（type annotation）</h3>
+<p>在变量/参数/返回值后面加 <code>: 类型</code>。基础类型有 <code>string</code> / <code>number</code> / <code>boolean</code> / <code>string[]</code>（字符串数组）等。注解写在被注解物的<b>后面</b>（和你熟的 <code>let x: number</code> 一致，不是 C 那种 <code>int x</code>）。<sup><a href="#c8">8</a></sup></p>
+<pre><code>const shortCode: string = 'a1B2c'
+const clicks: number = 0
+const tags: string[] = ['marketing', 'launch']
+
+// 函数：参数和返回值都标注
+function buildShortUrl(code: string): string {
+  return `https://lnk.pulse/${code}`
+}</code></pre>
+<p>很多时候 TS 能<b>自动推断（infer）</b>类型——<code>const clicks = 0</code> 它就知道是 <code>number</code>，不必手写。原则：<b>能推断就别画蛇添足，函数参数和公共 API 的返回值则建议显式写清楚</b>（当文档用）。<sup><a href="#c8">8</a></sup></p>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .3rem">② interface vs type：给「对象的形状」起名</h3>
+<p>这俩都能描述「一个对象长什么样」。这正是我们要给 LinkPulse 数据建模时最常用的工具。</p>
+<div class="cmp">
+<div>
+<h4>interface</h4>
+<pre><code>interface Link {
+  id: string
+  url: string
+  shortCode: string
+  clicks: number
+}</code></pre>
+</div>
+<div>
+<h4>type（类型别名）</h4>
+<pre><code>type Link = {
+  id: string
+  url: string
+  shortCode: string
+  clicks: number
+}</code></pre>
+</div>
+</div>
+<p><b>怎么选？</b> 描述对象形状，两者几乎等价。官方 Handbook 的建议是：<b>默认用 <code>interface</code></b>，当你需要表达「联合类型」「给原始类型起别名」等 <code>interface</code> 做不到的事时，才用 <code>type</code>。<sup><a href="#c8">8</a></sup> 一个实用差异：<code>interface</code> 可被「再次打开」追加字段（多次声明同名 interface 会合并），<code>type</code> 一旦定义不可更改——给 Express 扩展类型时会用到前者（后续章节遇到再说）。</p>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .3rem">③ 可选属性（optional property）</h3>
+<p>在字段名后加 <code>?</code>，表示「这个字段可以没有」。LinkPulse 里很多字段就是可选的——比如短链可以不设过期时间：</p>
+<pre><code>interface CreateLinkInput {
+  url: string          // 必填
+  customCode?: string  // 可选：用户想自定义短码就传，不传我们自动生成
+  expiresAt?: string   // 可选：不传 = 永不过期
+}</code></pre>
+<p>关键：可选字段的真实类型是「你写的类型 <b>或</b> <code>undefined</code>」。所以用之前必须<b>先判断有没有</b>，否则在 <code>strict</code> 模式下 TS 会拦你：<sup><a href="#c8">8</a></sup></p>
+<pre><code>function resolveCode(input: CreateLinkInput): string {
+  // input.customCode 的类型是 string | undefined
+  if (input.customCode !== undefined) {
+    return input.customCode      // 这里 TS 确信它是 string
+  }
+  return generateRandomCode()
+}</code></pre>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .3rem">④ 联合类型（union type）</h3>
+<p>用 <code>|</code> 表示「是这几种之一」。对 SaaS 太常用了——比如订阅套餐只能是固定几个值：</p>
+<pre><code>type Plan = 'free' | 'pro' | 'business'   // 这叫「字面量联合类型」，比 string 更精确
+
+interface User {
+  id: string
+  plan: Plan        // 只能是这三个字符串之一，写错 'pr' 会报错
+}</code></pre>
+<p>用联合类型的值时，TS 只允许你做「所有成员都支持的操作」；要区别对待就得<b>收窄（narrowing）</b>——用 <code>typeof</code>、<code>===</code> 比较等把范围缩小，TS 才放行对应分支的专属操作。<sup><a href="#c8">8</a></sup> 上面 ③ 里的 <code>if (input.customCode !== undefined)</code> 就是一次收窄。</p>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .3rem">⑤ 泛型初步（generics）</h3>
+<p><b>类比。</b> 泛型就是「类型的参数」——像函数能收参数一样，类型也能收一个「类型占位符」（习惯用 <code>T</code>），用的时候再填进去。你其实已经见过它：<code>string[]</code> 也可以写成 <code>Array&lt;string&gt;</code>，这里 <code>Array</code> 就是个泛型，<code>string</code> 是填进去的类型。</p>
+<p>本章只需认得一种形态：Express 的 <code>Response</code>、还有异步函数的返回值 <code>Promise&lt;T&gt;</code>。比如「一个最终给出 Link 的异步操作」写作 <code>Promise&lt;Link&gt;</code>：</p>
+<pre><code>// service 层：返回「一个最终是 Link 的 Promise」
+async function createLink(input: CreateLinkInput): Promise&lt;Link&gt; {
+  // ...存库、生成短码...
+  return { id, url: input.url, shortCode, clicks: 0 }
+}</code></pre>
+<p>现在记住「<code>Promise&lt;Link&gt;</code> = 异步拿到的 Link」就够了，深入用法后面接触数据库时再展开。</p>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .3rem">⑥ <code>any</code> vs <code>unknown</code>：处理「不知道是什么」的数据</h3>
+<p>后端天天要面对「类型未知的外部数据」（HTTP body、第三方返回）。TS 给了两个工具，差别巨大：</p>
+<table class="tstable">
+<tr><th></th><th><code>any</code></th><th><code>unknown</code></th></tr>
+<tr><td>含义</td><td>「别管它，关掉类型检查」</td><td>「确实未知，但用前必须先检查」</td></tr>
+<tr><td>能否直接用</td><td><span class="badmark">能</span>，TS 完全不拦——等于退回纯 JS</td><td><span class="okmark">不能</span>，必须先收窄成具体类型才能操作</td></tr>
+<tr><td>安全性</td><td>低：错误会漏到运行时</td><td>高：逼你先验证</td></tr>
+</table>
+<pre><code>function handle(raw: any) {
+  raw.toUpperCase()   // TS 不报错，但 raw 万一是数字 → 运行时崩
+}
+
+function handleSafe(raw: unknown) {
+  raw.toUpperCase()   // ❌ 编译报错：raw 类型未知，禁止直接调方法
+  if (typeof raw === 'string') {
+    raw.toUpperCase() // ✅ 收窄成 string 后才允许
+  }
+}</code></pre>
+<p><b>结论：能不用 <code>any</code> 就别用</b>——它等于亲手关掉 TS 的全部保护。<sup><a href="#c8">8</a></sup> 处理不可信输入时优先 <code>unknown</code>，再用 zod 之类的工具校验成可信类型。</p>
+<div class="rw">🌍 <b>实战：<code>any</code> 是「类型逃生舱」，但漏的水会淹到生产环境。</b> 团队里常约定开启 <code>noImplicitAny</code>（<code>strict</code> 已含），禁止「悄悄变成 any」；代码评审看到显式 <code>any</code> 一般要求写注释说明理由。还记得 0009 里 zod 干的活吗——它正是把 <code>req.body</code>（本质是 <code>unknown</code> 级别的不可信数据）<b>校验并收窄</b>成一个有类型的安全对象。TS 的 <code>unknown</code> 和 zod 是天生一对：<code>unknown</code> 负责「逼你检查」，zod 负责「替你检查」。</div>
+
+<h2><span class="n">6</span>动手迁移：把 LinkPulse 改成 TypeScript</h2>
+
+<p>理论齐了，开始把现有项目搬到 TS。我们的目标结构（代码全进 <code>src/</code>）：</p>
+
+<div class="tree">study-node/
+├─ tsconfig.json        ← 新增
+├─ package.json         ← scripts 已改
+├─ dist/                ← tsc 编译产物（git 忽略）
+└─ src/
+   ├─ app.ts            ← 原 express-server.js
+   ├─ config.ts         ← 原 config.js（0009）
+   ├─ types.ts          ← 新增：LinkPulse 的数据类型
+   ├─ schemas/
+   │  └─ link.schema.ts ← 原 zod schema（0009）
+   ├─ routes/
+   │  └─ link.routes.ts ← 原 routes（0008）
+   ├─ controllers/
+   │  └─ link.controller.ts
+   └─ services/
+      └─ link.service.ts</div>
+
+<p><b>第 1 步：定义 LinkPulse 的核心类型。</b> 新建 <code>src/types.ts</code>，把前面学的接口/可选/联合都用上：</p>
+<pre><code>// src/types.ts —— LinkPulse 的领域数据类型
+
+export type Plan = 'free' | 'pro' | 'business'
+
+// 一条短链在系统里的完整形状
+export interface Link {
+  id: string
+  url: string
+  shortCode: string
+  clicks: number
+  createdAt: string
+  expiresAt?: string   // 可选：不传 = 永不过期
+}
+
+// 创建短链时，外部允许传入的字段（注意：没有 id/clicks，那是系统生成的）
+export interface CreateLinkInput {
+  url: string
+  customCode?: string
+}</code></pre>
+
+<p><b>第 2 步：给 Express 类型化。</b> 把 <code>express-server.js</code> 搬到 <code>src/app.ts</code>，关键变化是从 express 同时导入 <code>Request</code>、<code>Response</code> 两个类型，用来标注 <code>req</code>/<code>res</code>。<sup><a href="#c9">9</a></sup>（这正是 0006/0008 里那些路由处理函数现在该有的样子）：</p>
+<pre><code>// src/app.ts
+import express, { Request, Response } from 'express'
+
+const app = express()
+app.use(express.json())
+
+app.get('/', (req: Request, res: Response) =&gt; {
+  res.send('LinkPulse API up')
+})
+
+// req/res 有了类型后，敲 req. 会自动补全 body/params/query/headers
+app.get('/greet/:name', (req: Request, res: Response) =&gt; {
+  res.json({ hello: req.params.name })   // params.name 自动补全且为 string
+})
+
+// 404 兜底中间件（和 0006 一样，只是现在有了类型）
+app.use((req: Request, res: Response) =&gt; {
+  res.status(404).send('Not Found')
+})
+
+app.listen(3000, () =&gt; {
+  console.log('Server running at http://localhost:3000')
+})</code></pre>
+
+<div class="note"><b>导入语法解读：</b> <code>import express, { Request, Response } from 'express'</code> 一行做了两件事——<code>express</code>（默认导入，是那个能调用的函数）+ <code>{ Request, Response }</code>（具名导入的两个<b>类型</b>）。这些类型来自你装的 <code>@types/express</code>。能这么干净地用「默认导入」，靠的就是 <code>tsconfig.json</code> 里那句 <code>esModuleInterop: true</code>。</div>
+
+<p><b>第 3 步：给分层（controller/service）和 zod 标类型。</b> 把 0008 的 controller、0009 的 service / zod schema 也搬进 <code>src/</code> 并改成 <code>.ts</code>。这里给出 controller 的类型化版本，让你看到「类型如何贯穿一整条请求链路」：</p>
+<pre><code>// src/controllers/link.controller.ts
+import { Request, Response } from 'express'
+import { createLinkSchema } from '../schemas/link.schema.js'  // 见下方注意
+import * as linkService from '../services/link.service.js'
+
+export async function createLink(req: Request, res: Response) {
+  // zod 把不可信的 req.body 校验 + 收窄成有类型的对象
+  const parsed = createLinkSchema.safeParse(req.body)
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() })
+  }
+  // parsed.data 现在的类型 ≈ CreateLinkInput，全程有补全
+  const link = await linkService.createLink(parsed.data)
+  res.status(201).json(link)   // link 是 Link 类型
+}</code></pre>
+
+<div class="note"><b>⚠️ 一个会绊住所有人的坑：相对导入要写 <code>.js</code> 后缀。</b> 因为我们用了 ESM + <code>module: NodeNext</code>，TS 要求你在<b>相对导入</b>里写出扩展名，而且<b>写的是 <code>.js</code> 不是 <code>.ts</code></b>——比如导入 <code>link.service.ts</code> 要写 <code>'../services/link.service.js'</code>。这看着违反直觉，原因是：你 import 的是「编译<b>之后</b>那个 <code>.js</code>」，TS 只是按运行时的实际文件名来对齐。<sup><a href="#c5">5</a></sup> 记住规则即可：<b>相对路径一律写 <code>.js</code></b>。（导入 <code>'express'</code> 这种第三方包则不用加后缀。）</div>
+
+<p><b>第 4 步：跑起来，并故意撞一次类型错误。</b> 启动开发服务器：</p>
+<pre><code>npm run dev        # = tsx watch src/app.ts，改文件自动重启</code></pre>
+<p>现在体会 TS 的「当场抓 bug」。在 <code>app.ts</code> 里故意写错一个字段名：</p>
+<pre><code>app.get('/greet/:name', (req: Request, res: Response) =&gt; {
+  res.json({ hello: req.params.nam })   // ❌ 把 name 拼成了 nam
+})</code></pre>
+<p>VS Code 立刻在 <code>nam</code> 下画红线，提示类似：<code>Property 'nam' does not exist on type ...</code>。<b>这就是 0009 那个「未声明就用变量」级别的 bug——只不过现在它在你按下保存键的瞬间就被逮住，而不是等用户访问 <code>/greet/...</code> 时才在日志里看到一个 <code>undefined</code>。</b> 跑一次 <code>npm run typecheck</code> 也会报同样的错并拒绝通过。改回 <code>name</code>，红线消失。</p>
+
+<div class="flow">
+请求链路上类型如何一路传递（<b>这就是 TS 在后端的全部价值</b>）：<br>
+HTTP 请求 → <b>req: Request</b>（@types/express 给的类型）<br>
+&nbsp;&nbsp;→ zod 校验 req.body → <b>CreateLinkInput</b>（不可信 → 可信，且有类型）<br>
+&nbsp;&nbsp;→ service.createLink(input) → <b>Promise&lt;Link&gt;</b><br>
+&nbsp;&nbsp;→ res.json(link) → 出错的字段名/类型全程红线兜底
+</div>
+
+<div class="rw">🌍 <b>实战：开 <code>strict</code> 才是 TS 真正发力的地方。</b> 很多人把 <code>.js</code> 改名成 <code>.ts</code> 就以为「上了 TS」，却把 <code>strict</code> 关着——那 TS 几乎等于没用，<code>undefined</code> 照样满天飞。<code>strict</code> 里最值钱的是 <code>strictNullChecks</code>：它强制你区分「有值」和「可能为 null/undefined」，逼你在用 <code>input.customCode</code>、数组 <code>.find()</code> 的结果之前先判空——这恰好封死了后端最高频的一类线上崩溃：<code>Cannot read properties of undefined</code>。<sup><a href="#c6">6</a></sup> LinkPulse 从第一天就开 <code>strict</code>，省下的是未来无数个深夜排查 <code>undefined</code> 的小时。</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">TS 工具链</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">你用 <code>npm run dev</code>（底层 <code>tsx watch</code>）开发 LinkPulse 时，把一个字段名拼错了，但服务竟然正常启动、访问到那条路由才返回 <code>undefined</code>。最合理的解释是？</p>
+  <button class="opt" data-correct="true" data-ex="正解。tsx 用 esbuild 即时转译、追求速度，明确不做类型检查——拼错字段这种类型错误它不拦，照样跑。类型检查要靠编辑器实时红线，或单独跑 tsc（如 npm run typecheck / npm run build）。这正是「tsx 开发图快、tsc 交付图稳」分工的体现。">tsx 为了快不做类型检查，类型错误得靠编辑器或单独的 <code>tsc</code> 来抓</button>
+  <button class="opt" data-correct="false" data-ex="不对。tsconfig 里 strict:true 是开着的，但 strict 影响的是『类型检查时』的严格程度。问题在于 tsx 这个运行器根本就跳过了类型检查这一步，strict 再严也没机会生效。">是因为 <code>tsconfig.json</code> 里忘了开 <code>strict</code></button>
+  <button class="opt" data-correct="false" data-ex="说反了。@types/express 提供的类型让编辑器能在你拼错时画红线（编译期）；它不会、也无法在运行时拦截错误。运行时不报错恰恰是因为运行器 tsx 没做类型检查，与 @types 装没装无关。">是因为没装 <code>@types/express</code>，运行时才不报错</button>
+  <button class="opt" data-correct="false" data-ex="无关。watch 只决定『改文件后要不要自动重启』，跟『跑之前查不查类型』是两码事。把 watch 去掉，tsx 依然不做类型检查。">是因为用了 <code>watch</code> 模式，<code>watch</code> 会跳过类型检查</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+<h3>⌨️ 动手：把 LinkPulse 正式迁到 TypeScript</h3>
+<ol>
+<li>根目录执行 <code>npm i -D typescript tsx @types/node @types/express</code>，确认 <code>package.json</code> 的 <code>devDependencies</code> 里出现这四个。</li>
+<li>新建 <code>tsconfig.json</code>（用本章第 3 节那份），并在 <code>.gitignore</code> 追加一行 <code>dist</code>。</li>
+<li>新建 <code>src/</code> 目录；把 <code>01-node-core/express-server.js</code> 搬成 <code>src/app.ts</code>，并把 0008/0009 的 routes、controller、service、zod schema 也搬进 <code>src/</code> 对应子目录、改后缀为 <code>.ts</code>。</li>
+<li>新建 <code>src/types.ts</code>，定义 <code>Link</code>、<code>CreateLinkInput</code>、<code>Plan</code>（参考第 6 节）。</li>
+<li>给 <code>app.ts</code> 的每个路由处理函数把 <code>req</code>/<code>res</code> 标注成 <code>Request</code>/<code>Response</code>；把所有<b>相对导入</b>补上 <code>.js</code> 后缀。</li>
+<li>把 <code>package.json</code> 的 <code>scripts</code> 改成第 4 节那四个（<code>dev</code>/<code>build</code>/<code>start</code>/<code>typecheck</code>）。</li>
+<li><code>npm run dev</code> 启动；浏览器访问 <code>http://localhost:3000/greet/kellen</code> 应返回 <code>{"hello":"kellen"}</code>。</li>
+<li><b>体会报错：</b> 把某个 <code>req.params.name</code> 故意拼成 <code>req.params.nam</code>，看 VS Code 红线；再跑 <code>npm run typecheck</code> 看 <code>tsc</code> 报错；改回去确认通过。</li>
+<li>（选做）<code>npm run build</code>，去 <code>dist/</code> 看看编译出来的纯 <code>.js</code> 长什么样——那才是上线真正跑的东西。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://www.typescriptlang.org/docs/handbook/2/everyday-types.html" target="_blank" rel="noopener">TypeScript Handbook · Everyday Types</a>（官方手册「日常类型」一章，把本章 §5 的类型注解、interface/type、可选属性、联合类型、any/unknown 都讲得最权威）。配套读 <a href="https://www.typescriptlang.org/tsconfig/" target="_blank" rel="noopener">TSConfig Reference</a> 查每个编译选项。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> ① <code>npm run dev</code> 启动成功、<code>/greet/你的名字</code> 返回正确 JSON 的截图；② 你故意制造的那个类型错误，VS Code 红线 + <code>tsc</code> 报错的截图（让我看到你「亲手撞了一次」）；③ 你的 <code>tsconfig.json</code> 和新的 <code>package.json scripts</code>。<br><strong>下一课预告：</strong> Lesson 0011 进入<b>阶段 2 的数据库部分</b>——认识 PostgreSQL，搞清「关系型数据库」是什么、为什么 LinkPulse 的短链和点击数据要存进它，并把数据库跑起来连上我们这个 TS 项目。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://www.typescriptlang.org/docs/handbook/intro.html" target="_blank" rel="noopener">TypeScript Handbook（官方手册首页/导论）</a>（TS 是 JavaScript 的带类型超集、是开发期工具；tsconfig 定义一个 TS 项目）。</li>
+    <li id="c2"><a href="https://nodejs.org/learn/typescript/run" target="_blank" rel="noopener">Node.js Learn · Running TypeScript</a>（tsx 不做类型检查、ts-node 默认做；二者均建议交付前用 tsc 再查；Node 22.7+ 有实验性类型剥离但默认不开）。</li>
+    <li id="c3"><a href="https://www.typescriptlang.org/docs/handbook/2/type-declarations.html" target="_blank" rel="noopener">TypeScript Handbook · Type Declarations / DefinitelyTyped</a>（<code>@types/*</code> 由 DefinitelyTyped 维护，为不自带类型的 JS 库补声明）。</li>
+    <li id="c4"><a href="https://www.typescriptlang.org/tsconfig/#target" target="_blank" rel="noopener">TSConfig Reference · target</a>（target 决定编译产物的 ECMAScript 语法版本）。</li>
+    <li id="c5"><a href="https://www.typescriptlang.org/docs/handbook/modules/guides/choosing-compiler-options.html" target="_blank" rel="noopener">TypeScript Handbook · Modules: Choosing Compiler Options</a>（Node ESM 项目用 <code>module/moduleResolution: NodeNext</code>；相对导入需写扩展名）。</li>
+    <li id="c6"><a href="https://www.typescriptlang.org/tsconfig/#strict" target="_blank" rel="noopener">TSConfig Reference · strict</a>（strict 是一组严格检查的总开关，含 strictNullChecks、noImplicitAny 等）。</li>
+    <li id="c7"><a href="https://www.typescriptlang.org/tsconfig/#rootDir" target="_blank" rel="noopener">TSConfig Reference · rootDir & outDir</a>（rootDir 控制路径前缀、不负责挑文件；outDir 指定产物目录；挑文件由 include 决定）。</li>
+    <li id="c8"><a href="https://www.typescriptlang.org/docs/handbook/2/everyday-types.html" target="_blank" rel="noopener">TypeScript Handbook · Everyday Types</a>（类型注解、interface vs type、可选属性、联合类型与收窄、any 与 unknown 的官方说明与示例）。</li>
+    <li id="c9"><a href="https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/express" target="_blank" rel="noopener">@types/express（DefinitelyTyped）</a>（从 express 具名导入 <code>Request</code>/<code>Response</code> 标注路由处理函数的官方类型来源）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0010 · 上一课 <a href="0009-config-and-logging.html">配置与日志</a> · 下一课（预告）：<em>认识 PostgreSQL：LinkPulse 的数据该往哪存</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

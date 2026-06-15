@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0016 · 短链跳转 + 用 Redis 缓存热点短链</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  .flow{display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; justify-content:center; margin:1.2rem 0; font-size:.78rem}
+  .flow .b{background:#fbf7ee; border:1px solid var(--accent); border-radius:6px; padding:.42rem .6rem; font-family:"SF Mono",Menlo,Consolas,monospace; text-align:center}
+  .flow .db{background:#eef3f7; border-color:#2e6e8e}
+  .flow .ca{background:#f9eef0; border-color:#9a3b2e}
+  .flow .hit{background:#eef6ee; border-color:#2e6e3f}
+  .flow .ar{color:var(--accent); font-weight:700; font-size:1.1em}
+</style>
+</head>
+<body>
+
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0016 / 阶段 3 · 收官</span></nav>
+<div class="kicker">Lesson 0016 · Node.js 后端之路</div>
+<h1>短链跳转 + 用 Redis 缓存热点短链<br><span style="font-size:.6em;color:var(--muted)">（LinkPulse 核心闭环达成 🎉）</span></h1>
+
+<div class="mission">
+  <b>这一课，LinkPulse 终于「活」了。</b> 前面你已经能<strong>创建</strong>短链并存进数据库（0015）。但短链的灵魂是——别人点一下 <code>yourdomain.com/ab12cd</code>，就<strong>跳转</strong>到原始长网址。这一课实现这个跳转；再用 <strong>Redis</strong> 给热门短链加缓存，让跳转快到飞起。学完，LinkPulse 的「创建 → 跳转 → 缓存」核心闭环就打通了。
+</div>
+
+<h2><span class="n">1</span>重定向（Redirect）：短链的本质</h2>
+<p>
+  短链跳转，靠的是 HTTP 的<strong>重定向（redirect）</strong>机制：服务器不直接返回内容，而是回一个状态码 <code>3xx</code> + 一个 <code>Location</code> 响应头，告诉浏览器「你要的东西在<strong>另一个地址</strong>，自己再去那儿」。浏览器收到后会自动再发一次请求到新地址。
+</p>
+<p>Express 把这件事封装成了一个方法 <code>res.redirect()</code>。默认情况下，它发的是 <strong>302</strong> 状态码<sup><a href="#c1">1</a></sup>：</p>
+<pre><code>res.redirect('https://example.com')        // 默认 302（临时重定向）
+res.redirect(301, 'https://example.com')   // 显式指定 301（永久重定向）</code></pre>
+
+<h3 style="margin:.6rem 0 .3rem">301 还是 302？这对短链很关键</h3>
+<ul>
+  <li><strong>301 Permanent（永久）</strong>：告诉浏览器/搜索引擎「这个地址<strong>永久</strong>搬到新址了」。浏览器会<strong>缓存</strong>这个跳转，下次直接去新址、<strong>不再请求你的服务器</strong>。</li>
+  <li><strong>302 Found（临时）</strong>：「<strong>暂时</strong>去那边」。浏览器<strong>每次都会先来问你的服务器</strong>，再跳转<sup><a href="#c1">1</a></sup>。</li>
+</ul>
+<div class="rw">
+  🌍 <b>实战：短链几乎都用 302，不用 301。</b> 道理在于——LinkPulse 要<strong>统计每一次点击</strong>。如果用 301，浏览器缓存了跳转，用户第二次点同一个短链时<strong>根本不会经过你的服务器</strong>，你就<strong>统计不到这次点击</strong>了！用 302，每次点击都会先打到你的服务器，你才能记一次点击、再放行。<b>「想统计点击」就用 302</b>——这是所有短链服务（Bitly 等）的共识。
+</div>
+<p class="note">📌 顺带一提：上面说的 301/302 是给 <code>GET</code> 用的。如果要重定向一个 <code>POST</code> 请求并保持方法不变，对应的是 <strong>307</strong>（临时）和 <strong>308</strong>（永久）。短链跳转是 GET，用 302 即可。</p>
+
+<h2><span class="n">2</span>实现跳转路由</h2>
+<p>逻辑很直白：拿到短码 → 查数据库找到原始 URL → 记一次点击 → 302 跳过去。用上你学过的路由参数（0005）和 Prisma（0014/0015）：</p>
+<pre><code>// src/routes/redirect.ts
+import { Router } from 'express'
+import { prisma } from '../db'
+
+const router = Router()
+
+// GET /:code  —— 例如 /ab12cd
+router.get('/:code', async (req, res, next) =&gt; {
+  try {
+    const { code } = req.params
+    const link = await prisma.link.findUnique({ where: { shortCode: code } })
+
+    if (!link) {
+      return res.status(404).send('短链不存在')
+    }
+
+    // 记一次点击（异步，别阻塞跳转——这里先简单 await，后续可优化成「先跳转后异步记录」）
+    await prisma.click.create({ data: { linkId: link.id } })
+
+    // 302 临时重定向到原始长链接
+    res.redirect(302, link.targetUrl)
+  } catch (err) {
+    next(err)   // 交给 0007 学的统一错误处理中间件
+  }
+})
+
+export default router</code></pre>
+<div class="rw">
+  ⚠️ <b>实战坑：<code>/:code</code> 是「贪吃」路由，必须放在最后挂载。</b> <code>/:code</code> 会匹配<strong>几乎所有路径</strong>（<code>/abc</code>、<code>/api</code>、<code>/health</code> 都被它吃掉）。所以在 <code>app.ts</code> 里，要把它放在 <strong>所有 <code>/api/...</code> 业务路由之后</strong>再挂载，否则它会把你的 API 请求也劫持去当短码查。这正是 0006「中间件/路由顺序很重要」的又一次实战体现：<br>
+  <code>app.use('/api/links', linksRouter)</code> → 先<br>
+  <code>app.use('/', redirectRouter)</code> → 后（兜底）
+</div>
+
+<h2><span class="n">3</span>为什么要缓存？Redis 是什么</h2>
+<p>
+  想象 LinkPulse 上有个爆款短链，一分钟被点几万次。按上面的代码，<strong>每一次</strong>点击都要查一次 PostgreSQL（<code>findUnique</code>）。数据库虽然不慢，但它要读磁盘、走网络、处理事务——当 QPS 极高时，这会成为瓶颈，而且跳转应该<strong>越快越好</strong>（用户在等着跳走）。
+</p>
+<p>
+  解法是<strong>缓存（cache）</strong>：把「短码 → 长 URL」这种<strong>读多写少、又要极快</strong>的数据，放进一个<strong>内存</strong>里的高速存储，避免每次都查数据库。这个存储，最常用的就是 <strong>Redis</strong>。
+</p>
+<ul>
+  <li><strong>Redis</strong> 是一个<strong>内存键值（key-value）数据库</strong>：数据存在内存里（不是磁盘），所以读写是<strong>微秒级</strong>，比查 PostgreSQL 快几个数量级。</li>
+  <li>最基础的两个操作：<code>SET key value</code>（存）、<code>GET key</code>（取）——就像一个超大、超快、所有进程共享的 <code>Map</code>。</li>
+  <li>还能给 key 设<strong>过期时间（TTL）</strong>，到点自动删除——天生适合做缓存。</li>
+</ul>
+<div class="rw">
+  🌍 <b>实战：Redis 远不止做缓存。</b> 它在真实后端里还常用来做：<strong>会话存储</strong>（session）、<strong>限流</strong>（记一个 IP 每分钟请求数）、<strong>排行榜/计数器</strong>、<strong>消息队列 / 发布订阅</strong>。LinkPulse 后面的「实时点击数」「接口限流」也会用到它。先从最经典的「缓存」用起。
+</div>
+
+<h2><span class="n">4</span>用 Docker 起 Redis + 连接</h2>
+<p>和 0011 起 PostgreSQL 一样，用 Docker 一条命令就能跑一个 Redis：</p>
+<pre><code>docker run --name linkpulse-redis -p 6379:6379 -d redis</code></pre>
+<p>Node 端用 <strong>ioredis</strong> 这个流行的客户端连接它<sup><a href="#c2">2</a></sup>：</p>
+<pre><code>// src/redis.ts
+import Redis from 'ioredis'
+
+// 默认就连 127.0.0.1:6379；生产从 env 读连接串
+export const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379')</code></pre>
+<p class="note">📌 和数据库一样，<code>REDIS_URL</code> 该放进 <code>.env</code>（0009 学的配置管理），不要硬编码。</p>
+
+<h2><span class="n">5</span>cache-aside：最常用的缓存模式</h2>
+<p>
+  知道了 Redis，关键是<strong>怎么用对</strong>。最经典的缓存模式叫 <strong>cache-aside（旁路缓存，也叫 lazy loading）</strong>：<strong>应用自己</strong>负责读写缓存和数据库，缓存只是「旁路」<sup><a href="#c3">3</a></sup>。流程是：
+</p>
+<div class="flow">
+  <span class="b">请求短码</span><span class="ar">→</span>
+  <span class="b ca">查 Redis</span><span class="ar">→</span>
+  <span class="b hit">命中？直接用 ✅</span>
+</div>
+<div class="flow">
+  <span class="b ca">Redis 未命中</span><span class="ar">→</span>
+  <span class="b db">查数据库</span><span class="ar">→</span>
+  <span class="b ca">写回 Redis(带 TTL)</span><span class="ar">→</span>
+  <span class="b">返回</span>
+</div>
+<ol>
+  <li><strong>先查缓存</strong>：缓存里有（<strong>cache hit</strong>）→ 直接用，不碰数据库。</li>
+  <li><strong>缓存没有</strong>（<strong>cache miss</strong>）→ 查数据库，拿到后<strong>写回缓存</strong>（并设个 TTL），再返回。</li>
+  <li>下次同样的请求就会命中缓存了。</li>
+</ol>
+<p>这就是「<strong>缓存在旁边、数据库是真相源</strong>」：第一次慢（要查库 + 回填），之后都快。<sup><a href="#c3">3</a></sup></p>
+
+<h2><span class="n">6</span>给跳转加上缓存</h2>
+<p>把第 2 节的跳转路由改造成 cache-aside（用 TypeScript）：</p>
+<pre><code>router.get('/:code', async (req, res, next) =&gt; {
+  try {
+    const { code } = req.params
+    const cacheKey = `link:${code}`
+
+    // ① 先查 Redis
+    let targetUrl = await redis.get(cacheKey)
+
+    // ② 未命中 → 查数据库 → 回填缓存
+    if (!targetUrl) {
+      const link = await prisma.link.findUnique({ where: { shortCode: code } })
+      if (!link) return res.status(404).send('短链不存在')
+
+      targetUrl = link.targetUrl
+      // 写回缓存，设 1 小时过期（EX = 秒）
+      await redis.set(cacheKey, targetUrl, 'EX', 3600)
+    }
+
+    // ③ 记点击（命中缓存也要记！点击统计不能漏）
+    //    注意：这里仍需 link.id，可在缓存里存 JSON，或为简单先按需查；
+    //    生产中常把「记点击」做成异步任务，避免拖慢跳转。
+    res.redirect(302, targetUrl)
+  } catch (err) {
+    next(err)
+  }
+})</code></pre>
+<div class="rw">
+  ⚠️ <b>实战：缓存一致性——更新/删除短链时要让缓存失效。</b> 如果用户改了某条短链的目标 URL，而 Redis 里还存着旧值，用户就会被跳到<strong>旧地址</strong>。解决：在「更新/删除短链」的逻辑里，顺手 <code>redis.del(\`link:\${code}\`)</code> 删掉缓存。<b>缓存最难的不是写，是「什么时候让它失效」</b>——这是后端经典难题（"there are only two hard things in CS: cache invalidation and naming things"）。TTL 是一道兜底防线（最坏 1 小时后自动同步），主动 <code>del</code> 是即时防线。
+</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">301 vs 302</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">LinkPulse 要统计每条短链被点了多少次。短链跳转应该用哪个状态码？为什么？</p>
+  <button class="opt" data-correct="true" data-ex="对！302 是临时重定向，浏览器每次点击都会先请求你的服务器，你才能记录这次点击、再跳转。想统计点击就必须用 302。">302：浏览器每次都会先经过服务器，才统计得到点击</button>
+  <button class="opt" data-correct="false" data-ex="错。301 是永久重定向，浏览器会缓存跳转，用户第二次点击就直接去目标地址、不再经过你的服务器，于是你漏掉了这些点击——对要做分析的短链是致命的。">301：永久重定向，浏览器缓存后跳转更快更省</button>
+  <button class="opt" data-correct="false" data-ex="错。307 用于需要保持方法不变的重定向（如 POST），短链跳转是 GET，用 302 即可，307 在这里不合适。">307：能保证点击统计最准确</button>
+  <button class="opt" data-correct="false" data-ex="错。200 是「直接返回内容」，不会让浏览器跳转到别的地址，无法实现「跳到原始长链接」这个核心功能。">200：直接返回，性能最好</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：实现跳转 + 缓存（约 25 分钟）</h3>
+  <ol>
+    <li>用 Docker 起 Redis：<code>docker run --name linkpulse-redis -p 6379:6379 -d redis</code>。</li>
+    <li><code>npm i ioredis</code>，新建 <code>src/redis.ts</code> 连接 Redis（连接串放 <code>.env</code> 的 <code>REDIS_URL</code>）。</li>
+    <li>新建 <code>src/routes/redirect.ts</code>，实现 <code>GET /:code</code>：查库 → 记点击 → <code>res.redirect(302, targetUrl)</code>。</li>
+    <li>在 <code>app.ts</code> 里，把 <code>redirectRouter</code> 挂在<strong>所有 <code>/api</code> 路由之后</strong>（避免「贪吃」路由劫持 API）。</li>
+    <li>先创建一条短链（用 0015 的 POST <code>/api/links</code>），拿到 <code>code</code>，然后<strong>浏览器访问 <code>http://localhost:3000/那个code</code></strong>，确认真的跳转到了原始长链接 🎉。</li>
+    <li><strong>加缓存</strong>：把跳转路由改成 §6 的 cache-aside 版。用 <code>redis-cli</code>（<code>docker exec -it linkpulse-redis redis-cli</code>）<code>GET link:你的code</code>，看缓存有没有被写进去。</li>
+    <li><strong>（加分）</strong>实现「更新短链时 <code>redis.del</code> 让缓存失效」，验证改了 URL 后跳转会更新。</li>
+  </ol>
+</div>
+
+<div class="src">
+  📖 <strong>本课首选精读源</strong>：
+  <a href="https://redis.io/docs/latest/develop/use-cases/cache-aside/" target="_blank" rel="noopener">Redis 官方 — Cache-aside</a>（缓存模式）；
+  <a href="https://redis.io/tutorials/develop/node/gettingstarted/" target="_blank" rel="noopener">Redis 官方 — Node.js 入门</a>；
+  跳转见 <a href="https://expressjs.com/en/api.html#res.redirect" target="_blank" rel="noopener">Express — res.redirect</a>。
+</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑通后发我：</b>① 浏览器访问短码后成功跳转的截图/说明；② <code>redis-cli GET link:你的code</code> 看到缓存命中的结果；③ 你对「为什么短链用 302 不用 301」的理解。
+  有报错（Redis 连不上、路由被劫持…）直接贴。<br>
+  <strong>🎉 阶段 3 收官！</strong>LinkPulse 现在能<strong>创建 + 持久化 + 跳转 + 缓存</strong>短链了——这是一个真正能用的产品内核。<strong>接下来（阶段 4+）：</strong>用户认证（注册/登录）、把「记点击」做成异步任务并出分析报表、订阅计费、最后容器化部署上线。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://expressjs.com/en/api.html#res.redirect" target="_blank" rel="noopener">Express 官方 — res.redirect()</a>（默认 302；可指定状态码如 301）。重定向状态码语义另见 <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status#redirection_messages" target="_blank" rel="noopener">MDN — HTTP 重定向状态码</a>。</li>
+    <li id="c2"><a href="https://redis.io/tutorials/develop/node/gettingstarted/" target="_blank" rel="noopener">Redis 官方 — Node.js (node-redis / ioredis) 入门</a>（createClient/连接、set/get）。客户端 <a href="https://github.com/redis/ioredis" target="_blank" rel="noopener">ioredis</a>。</li>
+    <li id="c3"><a href="https://redis.io/docs/latest/develop/use-cases/cache-aside/" target="_blank" rel="noopener">Redis 官方 — Cache-aside 模式</a>（先查缓存、未命中查库再回填的应用侧缓存策略）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0016 · 上一课 <a href="0015-link-crud-with-prisma.html">用 Prisma 实现短链 CRUD</a> · 阶段 3 收官 🎉 · 下一阶段（预告）：<em>认证 · 异步分析 · 计费 · 部署</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

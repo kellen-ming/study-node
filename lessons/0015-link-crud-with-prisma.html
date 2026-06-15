@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0015 · 用 Prisma 实现真正的短链 CRUD（替换假短码）</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属可视化：只在本页用到的类名 */
+.flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:.5rem;margin:1rem 0}
+.flow .step{flex:1 1 150px;border:1px solid var(--border,#3a3f4b);border-radius:10px;padding:.65rem .8rem;background:rgba(120,160,255,.06)}
+.flow .step b{display:block;font-size:.82rem;letter-spacing:.02em;opacity:.7;margin-bottom:.2rem}
+.flow .step code{font-size:.82rem}
+.flow .arrow{align-self:center;opacity:.5;font-weight:700}
+.codecmp{font-size:.82rem}
+table.api{border-collapse:collapse;width:100%;font-size:.86rem;margin:.8rem 0}
+table.api th,table.api td{border:1px solid var(--border,#3a3f4b);padding:.45rem .6rem;text-align:left;vertical-align:top}
+table.api th{background:rgba(120,160,255,.10)}
+table.api code{white-space:nowrap}
+.badcode{border-left:3px solid #e0584e}
+.goodcode{border-left:3px solid #38b27e}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0015 / 阶段 3</span></nav>
+<div class="kicker">Lesson 0015 · Node.js 后端之路</div>
+<h1>用 Prisma 实现真正的短链 CRUD（替换假短码）</h1>
+
+<div class="mission">
+<b>为什么学这个？</b> 到目前为止，LinkPulse 的 <code>POST /api/links</code> 只是把请求体读出来、拼一个<strong>假短码</strong>返回——刷新一下就什么都没了。本章是 LinkPulse <strong>第一次真正把数据存进数据库</strong>：我们用 <code>0014</code> 接好的 Prisma Client，在 <code>0008</code> 的分层结构里写一个真正的 <code>links</code> service，落库一条 <code>{ code, longUrl, userId }</code> 并返回 <code>201</code>；再补齐<strong>列表 / 查单条 / 删除</strong>，组成完整 CRUD。过程中你会解决三个真实后端工程师每天都在处理的问题：<strong>怎么生成不会撞、又不泄露内部信息的短码</strong>、<strong>万一短码真撞了怎么办</strong>、<strong>数据库报错如何优雅地变成 HTTP 响应</strong>。学完这一章，LinkPulse 就从「玩具 demo」迈进了「能持久化的真应用」。
+</div>
+
+<h2><span class="n">1</span>CRUD 是什么？把它对上 LinkPulse 的四个接口</h2>
+<p><strong>CRUD</strong> 是后端最基础的四个动作：<strong>C</strong>reate（增）、<strong>R</strong>ead（查）、<strong>U</strong>pdate（改）、<strong>D</strong>elete（删）。几乎所有「管理某种资源」的接口，本质都是这四件事的组合。对前端来说你早就熟悉它对应的 HTTP 方法——这里只快速对一下后端语境：</p>
+
+<table class="api">
+<thead><tr><th>动作</th><th>HTTP（你已熟）</th><th>Prisma 方法</th><th>LinkPulse 接口</th></tr></thead>
+<tbody>
+<tr><td>Create 增</td><td><code>POST</code> → 201</td><td><code>prisma.link.create()</code></td><td><code>POST /api/links</code> 建短链</td></tr>
+<tr><td>Read 查（列表）</td><td><code>GET</code> → 200</td><td><code>prisma.link.findMany()</code></td><td><code>GET /api/links</code> 我的短链列表</td></tr>
+<tr><td>Read 查（单条）</td><td><code>GET</code> → 200</td><td><code>prisma.link.findUnique()</code></td><td><code>GET /api/links/:code</code></td></tr>
+<tr><td>Delete 删</td><td><code>DELETE</code> → 204</td><td><code>prisma.link.delete()</code></td><td><code>DELETE /api/links/:code</code></td></tr>
+<tr><td>Update 改</td><td><code>PATCH</code> → 200</td><td><code>prisma.link.update()</code></td><td>（本章作为延伸，比如改 longUrl）</td></tr>
+</tbody>
+</table>
+
+<p>所谓「把假短码换成真 CRUD」，就是把每个接口里那行「假装干活」的代码，换成<strong>对应的 Prisma 方法真正读写 Postgres</strong>。整章我们都在做这一件事。</p>
+
+<div class="note">
+<b>回顾我们的分层（来自 0008）。</b> 数据从外到内分三层：<code>router</code>（认路、取参数）→ <code>service</code>（业务逻辑，本章主战场）→ <code>Prisma Client</code>（访问数据库）。<strong>本章的铁律：只有 service 层能 import Prisma。</strong> router 不直接碰数据库，这样以后换数据库、加缓存（下一章！）、写测试都只动一层。
+</div>
+
+<div class="flow">
+  <div class="step"><b>① Router</b><code>POST /api/links</code><br>取 <code>req.body</code></div>
+  <div class="arrow">→</div>
+  <div class="step"><b>② Zod 校验</b>longUrl 是合法 URL？<br>（0007）</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>③ Service</b>生成 code<br>调 <code>prisma.link.create</code></div>
+  <div class="arrow">→</div>
+  <div class="step"><b>④ Postgres</b>真正写入一行</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>⑤ 响应</b>201 + 干净的 JSON</div>
+</div>
+
+<h2><span class="n">2</span>短码怎么生成？为什么不能直接用自增 id</h2>
+<p>短链的核心就是那段 <code>code</code>（比如 <code>linkpulse.io/<b>aK3xY9</b></code>）。它必须满足两点：<strong>唯一</strong>（两条短链不能撞同一个 code，否则跳转就乱了），并且<strong>短、URL 友好</strong>（只含 URL 里安全的字符）。直觉上你可能想：数据库不是有自增主键 <code>id = 1, 2, 3...</code> 吗，把它转成短字符串不就行了？</p>
+
+<p>这条路（自增 id → base62）确实可行，但<strong>把数据库自增 id 暴露给外部是后端的一个经典坏味道</strong>，原因值得讲透：</p>
+<ul>
+<li><strong>可枚举（enumeration）= 信息泄露。</strong> 如果 <code>/1</code>、<code>/2</code>、<code>/3</code> 都能访问，任何人写个循环就能<strong>遍历你全站所有短链</strong>，顺带推断出「你一共创建了多少条」「增长有多快」——对一个收费 SaaS 来说这是商业机密。</li>
+<li><strong>可预测 = 安全隐患。</strong> 自增意味着「下一个 id」是可猜的。</li>
+<li><strong>id 应当是内部实现细节。</strong> 主键怎么生成是数据库的事，不该和「对外的公开标识」绑死。今天用 Postgres 自增，明天分库分表想换雪花 id，外部 URL 不该跟着变。</li>
+</ul>
+
+<p>所以业界的主流做法是：<strong>对外标识用一段随机生成的不透明字符串</strong>，和内部自增 id 分开。我们用 <strong>nanoid</strong> 来生成它。</p>
+
+<h3 style="font-size:1rem;margin:1.2rem 0 .4rem">nanoid 是什么</h3>
+<p><strong>nanoid</strong> 是一个极小（官方称约 118 字节）、安全、URL 友好的随机字符串 ID 生成器。<strong>默认调用 <code>nanoid()</code> 返回 21 个字符</strong>，用的字符集是 URL 友好的 <code>A-Za-z0-9_-</code>；官方明确这个长度的<strong>碰撞概率与 UUID v4 相当</strong>——「要有十亿分之一的重复概率，需要生成约 103 万亿个 ID」<sup><a href="#c3">3</a></sup>。</p>
+
+<pre><code class="codecmp">import { nanoid } from 'nanoid'
+
+nanoid()    //=&gt; "V1StGXR8_Z5jdHi6B-myT"  （21 字符，默认）
+nanoid(10)  //=&gt; "IRFa-VaY2b"             （传 size 控制长度）</code></pre>
+
+<p>对短链来说 21 个字符太长了——我们想要 <code>linkpulse.io/aK3xY9</code> 这种 6～8 位的短码。这就用到 nanoid 的 <strong><code>customAlphabet(alphabet, size)</code></strong>：自定义字符集和默认长度，它返回一个<strong>新的生成函数</strong><sup><a href="#c3">3</a></sup>。</p>
+
+<pre><code class="codecmp">import { customAlphabet } from 'nanoid'
+
+// 自定义字母表（去掉容易看错的 0/O、1/l/I），默认长度 7
+const generateCode = customAlphabet(
+  '23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ',
+  7
+)
+
+generateCode()  //=&gt; "aK3xY9p"
+generateCode(8) //=&gt; 也可临时覆盖成 8 位</code></pre>
+
+<div class="rw">🌍 <b>实战：短码生成策略，随机 vs 自增转 base62。</b> 两条路线各有取舍——
+<ul style="margin:.4rem 0 0">
+<li><b>随机（nanoid，我们的选择）：</b>无状态、不可枚举、不泄露规模、天然适合分布式（多台机器同时生成不打架）。代价是<strong>理论上可能撞</strong>（概率极低但非零），所以必须配合下一节的「唯一约束 + 冲突处理」。</li>
+<li><b>自增转 base62：</b>短码最短、保证不撞、还能按时间排序。代价是<strong>可枚举、需要一个全局递增源</strong>（分布式下要发号器），且暴露增长数据。很多大厂内部用变体（如先自增再用「加盐 + 可逆置换」打乱顺序），工程复杂度高。</li>
+</ul>
+对一个刚起步、要快速上线的 SaaS，<strong>随机短码 + 长度可调</strong>是性价比最高的默认选择。位数也是个增长杠杆：起步用 6～7 位足够，库里短链多了把默认长度调到 8 即可，碰撞概率指数级下降。</div>
+
+<div class="rw">🌍 <b>实战坑：nanoid 从 v5 起是「纯 ESM」。</b> 官方在 v5 把 nanoid 改成了 ESM-only，CommonJS 项目用 <code>require('nanoid')</code> 会直接报 <code>ERR_REQUIRE_ESM</code><sup><a href="#c4">4</a></sup>。<strong>对我们是好消息</strong>：LinkPulse 早在 0005 就是 <code>"type":"module"</code> 的 ESM 项目，所以 <code>import { customAlphabet } from 'nanoid'</code> 开箱即用，无需任何处理。但如果你将来在某个老的 CommonJS 项目里踩到这个错，记住两条出路：要么把项目转成 ESM，要么把 nanoid 锁在 3.x（最后一个 CJS 版本）。</div>
+
+<h2><span class="n">3</span>把 schema 接上：在 Link 表里放一个唯一的 code</h2>
+<p>承接 <code>0014</code>，我们的 <code>schema.prisma</code> 里已经有了 <code>User</code> 和 <code>Link</code>。本章对 <code>Link</code> 只做一件关键的事：<strong>给 <code>code</code> 字段加 <code>@unique</code></strong>。这一行是后面「冲突处理」的地基——它让数据库<strong>在底层强制</strong>「不可能存在两条相同 code」，是真正的最后防线（比应用层任何检查都可靠）。</p>
+
+<pre><code class="codecmp">// prisma/schema.prisma （在 0014 基础上确认这几行）
+model Link {
+  id        Int      @id @default(autoincrement())  // 内部主键，绝不对外暴露
+  code      String   @unique                        // ← 对外短码，数据库级唯一
+  longUrl   String
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([userId])   // 按用户查列表会频繁用到，建个索引
+}</code></pre>
+
+<p>改完 schema 别忘了像 0014 那样把它同步到数据库（迁移）：</p>
+<pre><code>npx prisma migrate dev --name add_unique_code</code></pre>
+
+<div class="note"><b>为什么 <code>@unique</code> 是「真正的」唯一保证？</b> 你可能想：那我在写入前先 <code>findUnique</code> 查一下 code 在不在不就行了？<strong>不行——这是经典的竞态条件（race condition）。</strong> 两个请求可能在「同一瞬间」都查到「code 不存在」，然后都去 create，结果撞车。只有数据库的 <code>UNIQUE</code> 约束是<strong>原子的</strong>：并发写入时它保证只有一个成功、另一个报错。所以正确姿势永远是<strong>直接写，撞了再处理</strong>（下一节），而不是「先查再写」。</div>
+
+<h2><span class="n">4</span>核心：用 Prisma Client 在 service 层实现 CRUD</h2>
+<p>现在进入主菜。我们把 LinkPulse 的 <code>links</code> 业务逻辑集中写在 <code>src/services/links.service.ts</code>。先认识本章要用的 Prisma Client 方法，全部来自官方 CRUD 文档<sup><a href="#c1">1</a></sup>：</p>
+
+<table class="api">
+<thead><tr><th>方法</th><th>作用</th><th>关键选项</th></tr></thead>
+<tbody>
+<tr><td><code>create({ data })</code></td><td>插入一条，返回新记录</td><td><code>data</code> 要写入的字段</td></tr>
+<tr><td><code>findUnique({ where })</code></td><td>按唯一字段查一条；查不到返回 <code>null</code></td><td><code>where</code> 必须是唯一字段（id/code）</td></tr>
+<tr><td><code>findMany({ where, skip, take, orderBy, select })</code></td><td>查多条（列表）</td><td><code>skip</code>/<code>take</code> 分页</td></tr>
+<tr><td><code>update({ where, data })</code></td><td>改一条；查不到抛 <code>P2025</code></td><td><code>where</code> + <code>data</code></td></tr>
+<tr><td><code>delete({ where })</code></td><td>删一条；查不到抛 <code>P2025</code></td><td><code>where</code></td></tr>
+</tbody>
+</table>
+
+<h3 style="font-size:1rem;margin:1.2rem 0 .4rem">4.1 Create：真正落库 + 不泄露内部 id</h3>
+<p>这是本章最重要的一段。注意两点：用 <code>select</code> <strong>明确选出要返回的字段</strong>（把内部 <code>id</code> 排除在外），以及生成 code 后调用 <code>prisma.link.create</code>。</p>
+
+<pre><code class="codecmp">// src/services/links.service.ts
+import { customAlphabet } from 'nanoid'
+import { prisma } from '../db.js'   // 0014 里导出的单例 PrismaClient
+
+const generateCode = customAlphabet(
+  '23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ',
+  7
+)
+
+// 对外返回时统一只暴露这些字段——内部 id 永不出现在响应里
+const publicLinkSelect = {
+  code: true,
+  longUrl: true,
+  createdAt: true,
+} as const
+
+export async function createLink(input: { longUrl: string; userId: number }) {
+  const code = generateCode()
+  return prisma.link.create({
+    data: { code, longUrl: input.longUrl, userId: input.userId },
+    select: publicLinkSelect,            // ← 关键：只返回安全字段
+  })
+}</code></pre>
+
+<div class="rw">🌍 <b>实战：永远不要在响应里泄露内部 id（和其它内部字段）。</b> 默认情况下 Prisma 的 <code>create</code>/<code>findMany</code> 会把<strong>整行</strong>都返回给你，包含自增 <code>id</code>、<code>userId</code> 这种内部字段。如果你直接 <code>res.json(link)</code>，就把第 2 节我们费力避免的「可枚举自增 id」又从响应里漏出去了。两种防漏手段：<b>(1)</b> 像上面那样用 <code>select</code> 白名单显式挑字段（推荐，最稳）；<b>(2)</b> 用 <code>omit</code> 反向排除。养成习惯：<strong>API 的「对外形状」由你主动决定，而不是默认把数据库表结构原样吐出去。</strong></div>
+
+<h3 style="font-size:1rem;margin:1.2rem 0 .4rem">4.2 处理唯一约束冲突：捕获 P2002 并重试</h3>
+<p>随机短码极少撞，但「极少」不是「不会」。当 <code>code</code> 撞上已存在的值，<code>@unique</code> 约束会让 <code>create</code> 失败，Prisma 抛出一个 <strong><code>PrismaClientKnownRequestError</code></strong>，其 <code>code</code> 字段为 <strong><code>"P2002"</code></strong>（unique constraint failed），<code>meta.target</code> 会告诉你是哪个字段撞了<sup><a href="#c2">2</a></sup>。正确策略：<strong>捕获 P2002 → 换个新 code 重试，重试几次仍失败才真正报错。</strong></p>
+
+<pre><code class="codecmp">// 推荐用 Prisma 命名空间来拿错误类型（见下方实战说明）
+import { Prisma } from '@prisma/client'
+
+export async function createLink(
+  input: { longUrl: string; userId: number },
+  maxRetries = 5,
+) {
+  for (let attempt = 0; attempt &lt; maxRetries; attempt++) {
+    const code = generateCode()
+    try {
+      return await prisma.link.create({
+        data: { code, longUrl: input.longUrl, userId: input.userId },
+        select: publicLinkSelect,
+      })
+    } catch (err) {
+      // 只有「code 撞了」才重试；其它错误直接往上抛
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        continue   // 换个 code 再试一次
+      }
+      throw err
+    }
+  }
+  throw new Error('生成唯一短码失败，请重试')   // 极端情况：连撞 5 次
+}</code></pre>
+
+<div class="rw">🌍 <b>实战：「乐观写入 + 捕获冲突重试」是处理唯一冲突的标准模式。</b> 注意我们<strong>没有「先 findUnique 查一下再 create」</strong>——前面说过那会引入竞态、还多一次查询。正确做法是<strong>乐观地直接写，撞了（P2002）再重试</strong>，把判断交给数据库的原子约束。这个模式在后端无处不在：注册时 email 撞、生成订单号撞、幂等键撞……都是同一招。重试上限设个 5 次足矣：用 7 位、50+ 字符的字母表，连撞 5 次的概率小到可以忽略，真撞到说明该把短码加长了。</div>
+
+<div class="rw">🌍 <b>实战：错误类型从哪 import？</b> 老教程常写 <code>import { PrismaClientKnownRequestError } from '@prisma/client'</code>，但随着 Prisma 客户端生成方式演进，<strong>更稳妥的写法是通过 <code>Prisma</code> 命名空间访问：<code>import { Prisma } from '@prisma/client'</code>，再用 <code>err instanceof Prisma.PrismaClientKnownRequestError</code></strong><sup><a href="#c5">5</a></sup>。如果你用了自定义 generator 输出目录，import 路径要相应改成你生成的 client 路径。判断时一定要先 <code>instanceof</code> 收窄类型，再读 <code>.code</code>——因为 catch 到的 <code>err</code> 是 <code>unknown</code>，不能直接当成功对象用（这正是 TypeScript 帮你避免的坑）。</div>
+
+<h3 style="font-size:1rem;margin:1.2rem 0 .4rem">4.3 Read：列表（带分页）与查单条</h3>
+<p>列表接口几乎一定要<strong>分页</strong>——总不能一个用户有十万条短链就一次性全查出来。Prisma 用 <strong><code>skip</code>（跳过几条）+ <code>take</code>（取几条）</strong>做偏移分页<sup><a href="#c1">1</a></sup>，配合 <code>where</code> 只查「当前用户的」短链、<code>orderBy</code> 排序。</p>
+
+<pre><code class="codecmp">// 列出某用户的短链，第 page 页、每页 pageSize 条
+export async function listLinks(opts: {
+  userId: number
+  page?: number
+  pageSize?: number
+}) {
+  const page = opts.page ?? 1
+  const pageSize = opts.pageSize ?? 20
+  return prisma.link.findMany({
+    where: { userId: opts.userId },          // 只看自己的
+    orderBy: { createdAt: 'desc' },          // 最新的在前
+    skip: (page - 1) * pageSize,             // 跳过前面几页
+    take: pageSize,                          // 本页取多少条
+    select: publicLinkSelect,                // 同样不泄露 id
+  })
+}
+
+// 查单条：findUnique 查不到会返回 null（不报错）
+export async function getLinkByCode(code: string) {
+  return prisma.link.findUnique({
+    where: { code },
+    select: publicLinkSelect,
+  })
+}</code></pre>
+
+<div class="rw">🌍 <b>实战：分页用 skip/take 还是 cursor？</b> <code>skip/take</code>（偏移分页）写起来最直观，适合「跳到第 N 页」的后台管理界面，是 LinkPulse 起步阶段的正确选择。但要知道它的短板：<code>skip</code> 越大数据库越慢（要先数过前面 N 条），而且翻页时若有新数据插入，会出现「重复或漏看」。当数据量很大、或做「无限下拉」时，业界会换成<strong>游标分页（cursor，基于 <code>cursor</code> + <code>take</code>）</strong>——按上一页最后一条的位置往后取，稳定且快。先用 skip/take 上线，等真有性能问题再升级，是务实的顺序。</div>
+
+<h3 style="font-size:1rem;margin:1.2rem 0 .4rem">4.4 Delete（与 Update）</h3>
+<p><code>delete</code> 删一条，<code>update</code> 改一条。两者的 <code>where</code> 都要定位到具体记录；<strong>如果记录不存在，Prisma 会抛 <code>P2025</code></strong>（依赖的记录未找到）<sup><a href="#c2">2</a></sup>——这正好对应 HTTP 的 <code>404 Not Found</code>，下一节统一处理。</p>
+
+<pre><code class="codecmp">export async function deleteLink(code: string) {
+  await prisma.link.delete({ where: { code } })
+  // 删除成功通常不返回 body，路由层回 204 No Content
+}
+
+// 延伸：改短链指向的长链接
+export async function updateLink(code: string, data: { longUrl: string }) {
+  return prisma.link.update({
+    where: { code },
+    data,
+    select: publicLinkSelect,
+  })
+}</code></pre>
+
+<h2><span class="n">5</span>把它们串起来：Zod 校验 + 路由 + 错误处理中间件</h2>
+<p>service 写好了，现在回到 <code>router</code> 层，把 <code>0007 的 Zod 校验</code>、本章的 service、<code>async/await + try/catch</code> 串成完整链路。</p>
+
+<h3 style="font-size:1rem;margin:1.2rem 0 .4rem">5.1 用 Zod 守住入口（复习 0007）</h3>
+<p>快速复习：<strong>Zod</strong> 是运行时校验库，定义一个 schema，用 <code>.parse()</code> 校验数据；不合法会抛 <code>ZodError</code>。短链最该校验的就是 <code>longUrl</code> 必须是合法 URL——否则我们会把垃圾存进库。</p>
+
+<pre><code class="codecmp">// src/schemas/link.schema.ts
+import { z } from 'zod'
+
+export const createLinkSchema = z.object({
+  longUrl: z.string().url('longUrl 必须是合法的 URL'),
+})
+export type CreateLinkInput = z.infer&lt;typeof createLinkSchema&gt;</code></pre>
+
+<h3 style="font-size:1rem;margin:1.2rem 0 .4rem">5.2 路由：薄薄一层，把活交给 service</h3>
+<pre><code class="codecmp">// src/routes/links.routes.ts
+import { Router } from 'express'
+import { createLinkSchema } from '../schemas/link.schema.js'
+import * as linksService from '../services/links.service.js'
+
+export const linksRouter = Router()
+
+// CREATE → 201
+linksRouter.post('/', async (req, res, next) => {
+  try {
+    const { longUrl } = createLinkSchema.parse(req.body)   // 校验
+    // userId 暂时写死；真实鉴权会在后续章节接入
+    const link = await linksService.createLink({ longUrl, userId: 1 })
+    res.status(201).json(link)
+  } catch (err) {
+    next(err)            // ← 关键：错误交给下面的错误处理中间件
+  }
+})
+
+// LIST → 200
+linksRouter.get('/', async (req, res, next) => {
+  try {
+    const page = Number(req.query.page) || 1
+    const links = await linksService.listLinks({ userId: 1, page })
+    res.json(links)
+  } catch (err) { next(err) }
+})
+
+// READ ONE → 200 / 404
+linksRouter.get('/:code', async (req, res, next) => {
+  try {
+    const link = await linksService.getLinkByCode(req.params.code)
+    if (!link) return res.status(404).json({ error: '短链不存在' })
+    res.json(link)
+  } catch (err) { next(err) }
+})
+
+// DELETE → 204
+linksRouter.delete('/:code', async (req, res, next) => {
+  try {
+    await linksService.deleteLink(req.params.code)
+    res.status(204).end()
+  } catch (err) { next(err) }
+})</code></pre>
+
+<h3 style="font-size:1rem;margin:1.2rem 0 .4rem">5.3 async/await + try/catch 与错误处理中间件的配合</h3>
+<p>这是很多人没讲透的一环。Express 4 的路由处理器如果是 <code>async</code> 函数，里面 <code>await</code> 的 Promise <strong>一旦 reject，Express 不会自动捕获</strong>——它不认识被拒绝的 Promise，请求会挂起。所以每个 async 路由都要 <code>try/catch</code>，在 catch 里调 <strong><code>next(err)</code></strong> 把错误手动「丢」给 Express 的<strong>错误处理中间件</strong>（你在 0006 见过中间件，错误中间件就是<strong>带 4 个参数 <code>(err, req, res, next)</code></strong> 的那种特殊中间件）。</p>
+
+<pre><code class="codecmp">// src/middleware/error.ts —— 注意是 4 个参数！Express 靠这个识别它是错误中间件
+import type { ErrorRequestHandler } from 'express'
+import { ZodError } from 'zod'
+import { Prisma } from '@prisma/client'
+
+export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) =&gt; {
+  // 1) 校验失败 → 400
+  if (err instanceof ZodError) {
+    return res.status(400).json({ error: '请求参数有误', details: err.issues })
+  }
+  // 2) Prisma 已知错误 → 按 code 映射成合适的 HTTP 状态
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    if (err.code === 'P2025') {                 // 记录不存在（删/改时）
+      return res.status(404).json({ error: '短链不存在' })
+    }
+    if (err.code === 'P2002') {                 // 唯一冲突兜底
+      return res.status(409).json({ error: '资源已存在' })
+    }
+  }
+  // 3) 其它没预料到的错误 → 500，且不把内部细节泄露给客户端
+  console.error(err)                            // 内部日志留全量
+  res.status(500).json({ error: '服务器内部错误' })
+}</code></pre>
+
+<pre><code class="codecmp">// src/app.ts —— 装配顺序很重要
+import express from 'express'
+import { linksRouter } from './routes/links.routes.js'
+import { errorHandler } from './middleware/error.js'
+
+const app = express()
+app.use(express.json())              // 解析 JSON body（0006）
+app.use('/api/links', linksRouter)   // 业务路由
+app.use(errorHandler)                // ← 错误中间件必须放在最后
+
+export { app }</code></pre>
+
+<div class="note"><b>为什么错误中间件放最后？</b> Express 按 <code>app.use</code> 注册顺序逐个匹配中间件。错误中间件要能接住<strong>前面所有路由</strong>抛出（经 <code>next(err)</code> 传来）的错误，所以必须注册在它们之后。它是整个应用的「错误兜底总闸」——好处是：业务代码只管 <code>throw</code> / <code>next(err)</code>，<strong>把「错误长什么样的 HTTP 响应」这件事收口到一个地方</strong>，再也不用在每个路由里重复写 try/catch 拼 JSON。</div>
+
+<div class="rw">🌍 <b>实战：500 错误绝不能把原始报错原文返回给客户端。</b> 上面第 3 条特意只回一句「服务器内部错误」，而把真实 <code>err</code> 打到 <code>console.error</code>。原因：数据库报错、堆栈信息里常含表名、字段名、SQL 片段甚至连接串线索——直接 <code>res.json(err)</code> 等于把内部结构送给攻击者侦察。<strong>规则：对内日志写全，对外响应只给「能安全公开、对用户有用」的信息。</strong> 已知的、可控的错误（Zod 400、Prisma P2025 404）才给具体提示；未知错误一律 500 + 通用文案。</div>
+
+<h2><span class="n">6</span>跑通：curl 验证 + Prisma Studio 眼见为实</h2>
+<p>启动 <code>npm run dev</code>，然后用 curl 走一遍完整 CRUD。重点是<strong>建完之后去数据库里确认那行真的存在</strong>——这是 LinkPulse 第一次持久化，值得亲眼看一次。</p>
+
+<pre><code># 1) 创建一条短链（注意：longUrl 必须是合法 URL，否则被 Zod 挡下返回 400）
+curl -i -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" \
+  -d '{"longUrl":"https://example.com/a/very/long/path?x=1"}'
+# 期望：HTTP/1.1 201 Created
+# {"code":"aK3xY9p","longUrl":"https://example.com/...","createdAt":"..."}
+# ← 注意响应里【没有 id、没有 userId】
+
+# 2) 列出（分页）
+curl -s "http://localhost:3000/api/links?page=1"
+
+# 3) 查单条（把 aK3xY9p 换成上面真实返回的 code）
+curl -s http://localhost:3000/api/links/aK3xY9p
+
+# 4) 删除 → 期望 204 No Content（无 body）
+curl -i -X DELETE http://localhost:3000/api/links/aK3xY9p
+
+# 5) 再查已删的 → 期望 404
+curl -i http://localhost:3000/api/links/aK3xY9p
+
+# 6) 故意发非法 url → 期望 400（Zod 拦截）
+curl -i -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" -d '{"longUrl":"not-a-url"}'</code></pre>
+
+<p>最后用 <strong>Prisma Studio</strong>（0014 装过）打开可视化界面，直接看 <code>Link</code> 表里那一行真实数据：</p>
+<pre><code>npx prisma studio   # 浏览器打开 http://localhost:5555，点 Link 表查看</code></pre>
+
+<div class="note"><b>看到数据了 = 里程碑达成。</b> 在 Prisma Studio 里你能看到完整的行：<code>id</code>（内部自增）、<code>code</code>（对外短码）、<code>longUrl</code>、<code>userId</code>、<code>createdAt</code>。对照一下：数据库里<strong>有</strong> id，但你的 API 响应里<strong>没有</strong> id——这正是第 4.1 节 <code>select</code> 白名单的功劳。从这一刻起，LinkPulse 不再是「刷新就丢」的玩具了。</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">P2002 / 唯一冲突</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">随机生成的短码 <code>code</code> 字段加了 <code>@unique</code>。新建短链时，处理「短码可能撞车」最稳妥的做法是？</p>
+  <button class="opt" data-correct="false" data-ex="这正是竞态条件（race condition）：两个并发请求可能同时查到「不存在」然后都去 create，照样撞车。而且多了一次查询。唯一约束的判断必须交给数据库原子完成。">先用 findUnique 查这个 code 在不在，不在才 create</button>
+  <button class="opt" data-correct="true" data-ex="正确。这是「乐观写入 + 捕获冲突重试」标准模式：直接 create，把唯一性判断交给数据库的原子约束；撞了会抛 PrismaClientKnownRequestError 且 code==='P2002'，捕获后换个新 code 重试，重试上限内仍失败才真正报错。">直接 create，捕获 P2002 错误后换个新 code 重试，重试几次仍失败才报错</button>
+  <button class="opt" data-correct="false" data-ex="去掉唯一约束等于自废武功——数据库的 UNIQUE 是并发下唯一可靠的最后防线。没有它，竞态下迟早写入重复 code，跳转就乱了。">把 code 的 @unique 去掉，这样就永远不会冲突报错了</button>
+  <button class="opt" data-correct="false" data-ex="捕获到错误后只 log、然后照样返回 201，会把「其实没建成功」当成功告诉客户端，制造数据不一致的幽灵 bug。错误要么重试解决、要么如实反映到响应。">catch 到错误就忽略，仍然返回 201 表示创建成功</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+<h3>⌨️ 动手：把假短码换成真 CRUD，并落进 Postgres</h3>
+<ol>
+<li><b>装 nanoid：</b>在项目根目录 <code>npm i nanoid</code>（ESM 项目直接可用）。</li>
+<li><b>确认 schema：</b>在 <code>prisma/schema.prisma</code> 的 <code>Link</code> 模型上确保 <code>code String @unique</code> 与 <code>@@index([userId])</code>，然后 <code>npx prisma migrate dev --name add_unique_code</code>。</li>
+<li><b>写 service：</b>新建 <code>src/services/links.service.ts</code>，用 <code>customAlphabet</code> 生成 7 位短码；实现 <code>createLink</code>（含 P2002 重试 + <code>select</code> 白名单不返回 id）、<code>listLinks</code>（skip/take 分页）、<code>getLinkByCode</code>、<code>deleteLink</code>。</li>
+<li><b>改路由：</b>把原来返回「假短码」的 <code>POST /api/links</code> 改成调 <code>createLink</code> 并回 <code>201</code>；补 <code>GET /api/links</code>（列表）、<code>GET /api/links/:code</code>（单条，查不到回 404）、<code>DELETE /api/links/:code</code>（回 204）。每个 async 路由都 <code>try/catch</code> + <code>next(err)</code>。</li>
+<li><b>挂错误中间件：</b>新建 <code>src/middleware/error.ts</code>（4 参数版），映射 <code>ZodError→400</code>、<code>P2025→404</code>、<code>P2002→409</code>、其它→500；在 <code>app.ts</code> 里 <strong>最后</strong> <code>app.use(errorHandler)</code>。</li>
+<li><b>验证：</b>按第 6 节的 curl 走完整流程（201 → 列表 → 单条 → 204 → 404 → 非法 url 400）。</li>
+<li><b>眼见为实：</b><code>npx prisma studio</code> 打开 <code>Link</code> 表，确认你创建的行真的在 Postgres 里，并核对「库里有 id、响应里没 id」。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://www.prisma.io/docs/orm/prisma-client/queries/crud" target="_blank" rel="noopener">Prisma ORM · CRUD (Reference)</a>——create / findUnique / findMany（含 skip+take 分页、select）/ update / delete 的官方权威用法。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> ① <code>POST /api/links</code> 的 <code>201</code> 响应（让我确认里面<strong>没有 id</strong>）；② Prisma Studio 里 <code>Link</code> 表那一行的截图；③ 故意发非法 url 得到的 <code>400</code>。如果遇到 <code>P2002</code> / <code>P2025</code> 的报错也贴给我，我们对一下错误中间件的映射。<br><strong>下一课预告：</strong> Lesson 0016 —— 实现 <code>GET /:code</code> 的真正<strong>跳转（302 redirect）</strong>，并用 <strong>Redis 缓存</strong>热门短码，让跳转飞快、还能扛住流量。LinkPulse 要开始「跑起来」了。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://www.prisma.io/docs/orm/prisma-client/queries/crud" target="_blank" rel="noopener">Prisma ORM Docs — CRUD (Reference)</a>（create / findUnique / findMany 的 where·skip·take·orderBy·select / update / delete 官方用法）</li>
+    <li id="c2"><a href="https://www.prisma.io/docs/orm/reference/error-reference" target="_blank" rel="noopener">Prisma ORM Docs — Error Reference</a>（P2002 = unique constraint failed，异常类 PrismaClientKnownRequestError、meta.target；P2025 = 依赖记录未找到）</li>
+    <li id="c3"><a href="https://github.com/ai/nanoid#readme" target="_blank" rel="noopener">nanoid — README (GitHub)</a>（默认 nanoid() 为 21 字符、字母表 A-Za-z0-9_-、与 UUID v4 相当的碰撞概率；customAlphabet(alphabet, size) 用法）</li>
+    <li id="c4"><a href="https://github.com/ai/nanoid/issues/491" target="_blank" rel="noopener">nanoid Issue #491 — ERR_REQUIRE_ESM with CommonJS</a>（nanoid v5 起为纯 ESM；CommonJS 项目 require 会报错，ESM 项目可直接 import）</li>
+    <li id="c5"><a href="https://www.prisma.io/docs/orm/prisma-client/debugging-and-troubleshooting/handling-exceptions-and-errors" target="_blank" rel="noopener">Prisma ORM Docs — Handling exceptions and errors</a>（用 instanceof 判断 PrismaClientKnownRequestError 并读取 .code 的官方做法；经 Prisma 命名空间访问错误类型）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0015 · 上一课 <a href="0014-prisma-getting-started.html">用 Prisma 连接 Postgres 入门</a> · 下一课（预告）：<em>实现 302 跳转与 Redis 缓存热门短码</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Node.js 后端之路 · 课程目录</title>
+<link rel="stylesheet" href="lesson.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <span>📚 课程目录</span>
+  <span>Node.js 后端之路</span>
+</nav>
+
+<div class="kicker">学习门户 · 由 /teach 维护</div>
+<h1>Node.js 后端之路</h1>
+<p class="home-sub">从前端工程师 → 能独立上线收费 SaaS 的全栈开发者。<br>贯穿项目：<strong>LinkPulse</strong>（短链接 + 访问分析 + 订阅付费）。</p>
+<p class="home-links">
+  🧭 <a href="../MISSION.md" target="_blank">MISSION（学习指南针）</a>
+  📖 <a href="../RESOURCES.md" target="_blank">RESOURCES（可信资源）</a>
+</p>
+
+<h2>课程（Lessons）</h2>
+<ul class="lesson-list">
+
+  <a class="lesson-card" href="0001-node-runtime-and-execution-order.html">
+    <span class="num">01</span>
+    <span class="body">
+      <p class="t">Node 的本质与执行顺序 <span class="badge done">✓ 已完成</span></p>
+      <p class="d">单线程 + 非阻塞 I/O、事件循环、同步→微任务→宏任务的执行顺序。阶段 1。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0002-event-loop-internals-visual.html">
+    <span class="num">02</span>
+    <span class="body">
+      <p class="t">事件循环内部机制（图解） <span class="badge done">✓ 已完成</span></p>
+      <p class="d">调用栈、各队列存在哪、事件循环 6 阶段；附 A E C 666 B 的可点击逐步动画。阶段 1。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0003-first-http-server.html">
+    <span class="num">03</span>
+    <span class="body">
+      <p class="t">HTTP 基础与你的第一个服务器 <span class="badge done">✓ 已完成</span></p>
+      <p class="d">HTTP 请求/响应解剖、用原生 <code>http</code> 写服务器、req/res、路由（routing）。阶段 1。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0004-modules-and-npm-project.html">
+    <span class="num">04</span>
+    <span class="body">
+      <p class="t">模块系统与第一个正式项目 <span class="badge done">✓ 已完成</span></p>
+      <p class="d">ESM <code>import</code> vs CommonJS <code>require</code>、<code>package.json</code>、npm scripts、真实项目结构。阶段 1。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0005-express-rewrite.html">
+    <span class="num">05</span>
+    <span class="body">
+      <p class="t">用 Express 重写服务器 <span class="badge done">✓ 已完成</span></p>
+      <p class="d">第一次 <code>npm install</code> 真实依赖；<code>app.get</code> 路由、<code>res.json</code>、路由参数 <code>:code</code>，告别 if/else。阶段 2。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0006-middleware-and-request-body.html">
+    <span class="num">06</span>
+    <span class="body">
+      <p class="t">中间件与处理 POST 请求体 <span class="badge done">✓ 已完成</span></p>
+      <p class="d">middleware 概念与执行顺序、<code>express.json()</code> 解析 <code>req.body</code>、写日志中间件、POST 创建短链雏形。阶段 2。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0007-validation-error-handling.html">
+    <span class="num">07</span>
+    <span class="body">
+      <p class="t">输入校验与错误处理 <span class="badge now">下一课 →</span></p>
+      <p class="d">用 zod 校验 <code>req.body</code>、统一错误处理中间件、「永不信任用户输入」。阶段 2。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0008-router-and-layering.html">
+    <span class="num">08</span>
+    <span class="body">
+      <p class="t">路由拆分与分层架构 <span class="badge todo">待学</span></p>
+      <p class="d"><code>express.Router</code>、route / controller / service 三层、关注点分离。阶段 2。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0009-config-and-logging.html">
+    <span class="num">09</span>
+    <span class="body">
+      <p class="t">配置管理与结构化日志 <span class="badge todo">待学</span></p>
+      <p class="d"><code>.env</code> / dotenv、pino 结构化日志、12-factor 配置、密钥不进 git。阶段 2。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0010-add-typescript.html">
+    <span class="num">10</span>
+    <span class="body">
+      <p class="t">给项目加上 TypeScript <span class="badge todo">待学</span></p>
+      <p class="d">tsconfig、tsx、类型化 req/res、TS 基础补齐。<strong>此后代码全用 TS</strong>。阶段 2。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0011-database-intro-postgres.html">
+    <span class="num">11</span>
+    <span class="body">
+      <p class="t">数据库入门与 PostgreSQL <span class="badge todo">待学</span></p>
+      <p class="d">为何用数据库、关系型 vs 文档型、用 Docker 起 Postgres 并连接。阶段 3。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0012-sql-basics.html">
+    <span class="num">12</span>
+    <span class="body">
+      <p class="t">SQL 基础 <span class="badge todo">待学</span></p>
+      <p class="d">建表、增删改查、约束（PK/FK/UNIQUE/NOT NULL）、索引初步。阶段 3。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0013-data-modeling.html">
+    <span class="num">13</span>
+    <span class="body">
+      <p class="t">数据建模：为 LinkPulse 设计表 <span class="badge todo">待学</span></p>
+      <p class="d">ER 建模、主外键、1NF→3NF、索引/迁移、设计 users / links / clicks 三表。阶段 3。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0014-prisma-getting-started.html">
+    <span class="num">14</span>
+    <span class="body">
+      <p class="t">Prisma 入门 <span class="badge todo">待学</span></p>
+      <p class="d">ORM 是什么、<code>schema.prisma</code>、<code>prisma migrate</code>、类型安全查询。阶段 3。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0015-link-crud-with-prisma.html">
+    <span class="num">15</span>
+    <span class="body">
+      <p class="t">用 Prisma 实现真正的短链 CRUD <span class="badge todo">待学</span></p>
+      <p class="d">nanoid 生成短码、唯一冲突处理、分页、真正把短链持久化进数据库。阶段 3。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0016-redirect-and-redis-cache.html">
+    <span class="num">16</span>
+    <span class="body">
+      <p class="t">短链跳转 + Redis 缓存 <span class="badge todo">待学</span></p>
+      <p class="d"><code>res.redirect</code> 302、cache-aside 缓存模式、ioredis。<strong>LinkPulse 核心闭环达成 🎉</strong>。阶段 3。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0017-auth-basics.html">
+    <span class="num">17</span>
+    <span class="body">
+      <p class="t">认证基础：注册 / 登录 / JWT <span class="badge todo">待学</span></p>
+      <p class="d">认证 vs 授权、密码哈希（bcrypt）、JWT 签发，给 LinkPulse 加注册登录。阶段 4。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0018-authz-and-security.html">
+    <span class="num">18</span>
+    <span class="body">
+      <p class="t">授权与 Web 安全加固 <span class="badge todo">待学</span></p>
+      <p class="d">鉴权中间件、越权（IDOR）防护、RBAC、OWASP Top 10、helmet、限流。阶段 4。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0019-design-patterns-solid.html">
+    <span class="num">19</span>
+    <span class="body">
+      <p class="t">设计模式与 SOLID <span class="badge todo">待学</span></p>
+      <p class="d">依赖注入、Repository 模式、SOLID 原则，重构 LinkService 让其可测可换。阶段 4。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0020-background-jobs-queues.html">
+    <span class="num">20</span>
+    <span class="body">
+      <p class="t">后台任务与队列（BullMQ） <span class="badge todo">待学</span></p>
+      <p class="d">点击异步入队、独立 worker 落库、重试/幂等、定时聚合任务。阶段 5。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0021-realtime-websocket-dashboard.html">
+    <span class="num">21</span>
+    <span class="body">
+      <p class="t">实时点击看板（WebSocket / SSE） <span class="badge todo">待学</span></p>
+      <p class="d">轮询 vs SSE vs WebSocket 选型、用 <code>ws</code> 广播、worker 推送实时点击。阶段 5。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0022-performance-and-load-testing.html">
+    <span class="num">22</span>
+    <span class="body">
+      <p class="t">性能优化与压测 <span class="badge todo">待学</span></p>
+      <p class="d">autocannon 压测、N+1 问题、索引、连接池、不阻塞事件循环。阶段 5。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0023-automated-testing.html">
+    <span class="num">23</span>
+    <span class="body">
+      <p class="t">自动化测试 <span class="badge todo">待学</span></p>
+      <p class="d">测试金字塔、Vitest 单元（注入 mock）、supertest 集成测 API。阶段 6。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0024-dockerize.html">
+    <span class="num">24</span>
+    <span class="body">
+      <p class="t">用 Docker 容器化 <span class="badge todo">待学</span></p>
+      <p class="d">多阶段构建编译 TS、.dockerignore、docker-compose 一键起 app+pg+redis。阶段 7。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0025-cicd-and-deployment.html">
+    <span class="num">25</span>
+    <span class="body">
+      <p class="t">CI/CD 与部署上线 <span class="badge todo">待学</span></p>
+      <p class="d">GitHub Actions（test+build）、部署到 Render、migrate deploy、Sentry 监控。阶段 7。</p>
+    </span>
+  </a>
+
+  <a class="lesson-card" href="0026-stripe-billing-and-launch.html">
+    <span class="num">26</span>
+    <span class="body">
+      <p class="t">Stripe 订阅计费 + 上线清单 <span class="badge done">收官 🎉</span></p>
+      <p class="d">Stripe Checkout + Webhook、套餐限额、上线清单。LinkPulse 成为可收费 SaaS！阶段 8。</p>
+    </span>
+  </a>
+
+</ul>
+
+<h2>路线图（Roadmap）</h2>
+<ul class="roadmap">
+  <li><span class="ph">0</span>热身：运行时心智模型 + TS / 工具链起步</li>
+  <li><span class="ph">1</span>Node 核心 + 网络（已完成 ✓）</li>
+  <li class="active"><span class="ph">2</span>Web 框架 + API 设计（Express / zod / 日志 / TS）← 你在这里</li>
+  <li><span class="ph">3</span>数据库与建模（SQL / PostgreSQL / Prisma / Redis）← 课件已就绪</li>
+  <li><span class="ph">4</span>认证 · 安全 · 设计模式（JWT / OWASP / SOLID）← 课件已就绪</li>
+  <li><span class="ph">5</span>异步 · 性能 · 实时（BullMQ / WebSocket / 压测）← 课件已就绪</li>
+  <li><span class="ph">6</span>测试与工程质量（Vitest / supertest）← 课件已就绪</li>
+  <li><span class="ph">7</span>Docker · 部署 · 运维（CI/CD / Render / Sentry）← 课件已就绪</li>
+  <li><span class="ph">8</span>产品化收尾（Stripe 订阅 / 上线清单）← 课件已就绪 🎉</li>
+</ul>
+
+<footer>
+  <p>这是一个<strong>零构建</strong>的教学站点：所有课件都是可直接 <code>open</code> 的 HTML，共享 <code>lesson.css</code> 与 <code>lesson.js</code>，无需 <code>npm install</code> 或 dev server。</p>
+  <p style="margin-top:.6rem">未来计划：等后端有基础后，把「用 Next.js + TS 重做这个课程门户」当成一个正式实战项目 🚀</p>
+</footer>
+
+</body>
+</html>

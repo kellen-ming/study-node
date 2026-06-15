@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0025 · CI/CD 与部署上线</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：流水线管道可视化 */
+.pipe{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:1rem 0;font-size:.82rem}
+.pipe .stg{flex:1;min-width:120px;border:1px solid var(--border,#3a3a4a);border-radius:8px;padding:.6rem .5rem;text-align:center;background:rgba(120,160,255,.06)}
+.pipe .arr{display:flex;align-items:center;padding:0 .35rem;color:#8aa;font-weight:bold}
+.pipe .stg b{display:block;font-size:.92rem;margin-bottom:.2rem}
+.pipe .stg.gate{background:rgba(255,180,80,.1);border-color:#caa060}
+.pipe .stg.deploy{background:rgba(110,220,150,.1);border-color:#6ec896}
+.envtag{display:inline-block;font-size:.72rem;padding:.1rem .45rem;border-radius:999px;background:#34344a;color:#cdd;margin-left:.3rem;vertical-align:middle}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0025 / 阶段 7</span></nav>
+<div class="kicker">Lesson 0025 · Node.js 后端之路</div>
+<h1>CI/CD 与部署上线：让 LinkPulse 真正跑在公网上</h1>
+
+<div class="mission"><b>为什么学这个？</b> 上一课你把 LinkPulse 装进了 Docker 镜像，现在它能在「任何机器」上一致地跑。但镜像还在你笔记本里。本章要做两件事：① 用 <b>GitHub Actions</b> 搭一条流水线，每次 push 自动 lint + test + build，把「能不能合并」交给机器人当守门员；② 把镜像部署到一个真实的 <b>PaaS 平台</b>（以 Render 为主线），配好 <code>/health</code> 健康检查、数据库迁移、secrets 管理，再接上 <b>Sentry</b> 抓线上异常。学完这一课，<code>https://你的域名/abc123</code> 会真的能跳转——下一课就能接 Stripe 收费了。</div>
+
+<h2><span class="n">1</span>CI/CD 到底是什么：把「手动操作」自动化</h2>
+
+<p>你做前端时大概见过「pre-commit 跑 ESLint」「Vercel 自动部署预览」这类东西——那就是 CI/CD 的味道。我们把概念讲透。</p>
+
+<p><b>CI（Continuous Integration，持续集成）</b>：每当有人把代码推送到仓库，自动化系统就立刻把所有人的代码「集成」到一起并验证它没坏——装依赖、跑 lint、跑测试、编译构建。<b>类比</b>：像工厂流水线上的质检员，每个零件下线都立刻检验，而不是攒到月底一次性返工。CI 的核心价值是<b>尽早发现集成冲突和回归 bug</b>，缩短「写错 → 发现」的反馈环。</p>
+
+<p><b>CD</b> 有两种常见展开，别混淆：</p>
+<ul>
+<li><b>Continuous Delivery（持续交付）</b>：CI 通过后，自动把产物打包成「随时可发布」的状态，但<b>最后上线那一下需要人点确认</b>。</li>
+<li><b>Continuous Deployment（持续部署）</b>：连点确认都省了，CI 一绿就<b>自动推到生产环境</b>。</li>
+</ul>
+
+<p>对 LinkPulse 这种单人/小团队 SaaS，常见的务实做法是：<b>CI 全自动 + CD 用「交付」语义</b>——push 到 <code>main</code> 自动跑测试，测试绿了由平台（Render）自动构建并发布。既享受自动化，又保留一道闸。</p>
+
+<div class="note"><b>反馈环越短越值钱。</b> 一个 bug 在本地被你 30 秒发现，成本几乎为零；在 CI 里 3 分钟发现，成本是「等一会」；上线后被付费用户发现，成本是「退款 + 信任流失 + 半夜爬起来修」。CI/CD 的全部意义就是把发现 bug 的位置往前推。</p></div>
+
+<h2><span class="n">2</span>GitHub Actions 工作流：一个 YAML 文件就是一条流水线</h2>
+
+<p><b>GitHub Actions</b> 是 GitHub 内置的 CI/CD 系统。它的运行单位叫 <b>workflow（工作流）</b>，用一个 YAML 文件描述，放在仓库的 <code>.github/workflows/</code> 目录里。GitHub 会按你设定的<b>事件（event）</b>触发它，在一台临时的云虚拟机（<b>runner</b>，跑过即销毁）上执行。<sup><a href="#c1">1</a></sup></p>
+
+<p>三个核心词，先建立心智模型：</p>
+<ul>
+<li><b>workflow</b>：一整个 <code>.yml</code> 文件，回答「什么时候、做哪些事」。</li>
+<li><b>job</b>：一组步骤，跑在<b>一台全新的 runner</b> 上。不同 job 默认并行、互相隔离。</li>
+<li><b>step</b>：job 里的一步，要么 <code>run:</code> 执行 shell 命令，要么 <code>uses:</code> 调用别人写好的「action」（可复用的封装，比如 <code>actions/checkout</code> 把你的代码 git clone 下来）。</li>
+</ul>
+
+<div class="pipe">
+<div class="stg"><b>push / PR</b>触发事件</div>
+<div class="arr">→</div>
+<div class="stg"><b>checkout</b>拉代码</div>
+<div class="arr">→</div>
+<div class="stg"><b>setup-node</b>装 Node</div>
+<div class="arr">→</div>
+<div class="stg"><b>npm ci</b>装依赖</div>
+<div class="arr">→</div>
+<div class="stg gate"><b>lint+test</b>守门员</div>
+<div class="arr">→</div>
+<div class="stg"><b>build</b>tsc 编译</div>
+</div>
+
+<p>给 LinkPulse 写第一条流水线。新建 <code>.github/workflows/ci.yml</code>：</p>
+
+<pre><code># .github/workflows/ci.yml
+name: CI
+
+# 触发时机：推到 main，或者向 main 发起 PR 时
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:                          # job 名叫 test —— 这个名字稍后会用于分支保护
+    runs-on: ubuntu-latest       # 用 GitHub 托管的最新 Ubuntu runner
+
+    # 测试需要真的数据库 → 用 service container 起一个临时 Postgres
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: linkpulse
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: linkpulse_test
+        ports: ['5432:5432']
+        # 等 Postgres 真的就绪再继续，否则迁移会连接失败
+        options: &gt;-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # 测试库连接串：指向上面那个 service container
+      DATABASE_URL: postgresql://linkpulse:test@localhost:5432/linkpulse_test
+
+    steps:
+      - uses: actions/checkout@v4          # 1. 把仓库代码拉到 runner 上
+
+      - uses: actions/setup-node@v4        # 2. 安装指定版本 Node 并开启缓存
+        with:
+          node-version: '20'
+          cache: 'npm'                     # 缓存 ~/.npm，二次跑更快
+
+      - run: npm ci                        # 3. 严格按 lockfile 安装（见下方实战）
+
+      - run: npx prisma generate           # 4. 生成 Prisma Client（types 依赖它）
+
+      - run: npm run lint                  # 5. 守门员之一：代码规范
+
+      - run: npx prisma migrate deploy     # 6. 把迁移应用到测试库
+
+      - run: npm test                      # 7. 守门员之二：自动化测试
+
+      - run: npm run build                 # 8. tsc 编译，确保产物能构建
+</code></pre>
+
+<p>注意几个被 YAML 缩进决定语义的细节：<code>on</code> 定义触发事件；<code>jobs.test</code> 是唯一一个 job；<code>steps</code> 里第一步几乎永远是 <code>actions/checkout</code>（不拉代码 runner 上什么都没有）。<code>actions/setup-node</code> 是官方推荐的安装 Node 的方式，因为它能保证不同 runner、不同 Node 版本下行为一致。<sup><a href="#c1">1</a></sup><sup><a href="#c2">2</a></sup></p>
+
+<div class="rw">🌍 <b>实战：<code>npm ci</code> 而不是 <code>npm install</code>。</b> CI 环境里要用 <code>npm ci</code>：它<b>严格依据 <code>package-lock.json</code></b> 安装，版本完全可复现，且不会偷偷改写 lockfile。<code>npm install</code> 可能根据 <code>^</code> 范围拉到更新的小版本，导致「本地能过、CI 挂了」或更糟的「CI 过了、生产挂了」。一字之差，可复现性天壤之别。</div>
+
+<div class="rw">🌍 <b>实战：测试要连真数据库，别 mock 掉 Prisma。</b> LinkPulse 的核心逻辑（短码唯一约束、点击计数自增）全在 SQL 层。用上面的 <b>service container</b> 起一个一次性 Postgres，让测试跑在真库上，才能抓到「unique 冲突没处理」这类只有真库会暴露的 bug。Mock 掉数据库的测试，等于考试时把答案抄在卷子上——过了也没意义。</div>
+
+<h2><span class="n">3</span>自动测试当「守门员」：CI 不绿，不许合并</h2>
+
+<p>光跑测试还不够——如果挂了的代码照样能合进 <code>main</code>，CI 就只是个摆设。真正的守门员靠 GitHub 的<b>分支保护（branch protection）</b>实现：在仓库设置里给 <code>main</code> 开启「<b>Require status checks to pass before merging</b>」，并把上面那个名为 <code>test</code> 的 job 选为<b>必需检查（required status check）</b>。这样只要 CI 红了，PR 上的「Merge」按钮就是灰的，谁都点不动。<sup><a href="#c3">3</a></sup></p>
+
+<div class="tree">仓库 Settings → Branches → Add branch protection rule
+  Branch name pattern: main
+  [✓] Require a pull request before merging
+  [✓] Require status checks to pass before merging
+       └─ 搜索并勾选: test        ← 就是 ci.yml 里的 job 名
+  [✓] Require branches to be up to date before merging</div>
+
+<div class="note"><b>job 名要全局唯一。</b> GitHub 官方提醒：用于必需检查的 job 名在所有 workflow 里必须唯一，否则同名 job 会造成状态检查结果歧义，可能莫名其妙挡住合并。<sup><a href="#c3">3</a></sup> 我们就一个 <code>test</code> job，暂时没问题，但以后加 workflow 时记住这点。</div>
+
+<div class="rw">🌍 <b>实战：「CI 不过不许合并」是团队工程化的分水岭。</b> 没有这条规则，迟早有人「就这一行、很急、直接 push」把 <code>main</code> 搞挂，连累所有人。开了它之后，<code>main</code> 永远是「测试通过的可发布状态」，部署才敢自动化。这一条规则的 ROI 高到离谱——花两分钟点几个勾，换来「main 永远是绿的」这个心理保障。</div>
+
+<h2><span class="n">4</span>部署目标选型：PaaS vs 自管 VPS</h2>
+
+<p>测试绿了，产物也构建出来了，往哪儿放？两条路：</p>
+
+<div class="cmp">
+<div><h4>PaaS（Platform as a Service）<span class="envtag">推荐起步</span></h4>
+<pre><code>代表: Render / Railway / Fly.io
+
+你只管交代码或 Dockerfile，
+平台负责：
+  · 构建镜像
+  · 跑容器、给公网域名 + HTTPS
+  · 健康检查、滚动发布、自动重启
+  · 托管 Postgres / Redis
+  · 看日志、看 metrics
+
+类比: 住酒店——水电网全包，
+      拎包入住，按月付钱。</code></pre></div>
+<div><h4>自管 VPS（Virtual Private Server）</h4>
+<pre><code>代表: 一台云主机
+     (EC2 / DigitalOcean Droplet)
+
+你要自己搞定：
+  · 装 Docker、配 Nginx 反代
+  · 申请 + 续期 TLS 证书
+  · 防火墙、系统更新、备份
+  · 进程守护、崩溃重启
+  · 监控、日志收集
+
+类比: 自己租毛坯房——便宜、
+      自由，但水电网装修全自理。</code></pre></div>
+</div>
+
+<p>对一个想<b>尽快上线收费</b>的单人 SaaS，结论很清晰：<b>先上 PaaS</b>。运维不是你现在的护城河，「能跑、能收钱、别半夜宕」才是。等用户和账单都涨上来、对成本敏感了，再考虑迁到 VPS 优化单价。三家主流 PaaS 都直接支持<b>从 Dockerfile 部署</b>——正好接住你上一课做好的镜像。</p>
+
+<div class="rw">🌍 <b>实战：用容器或 PaaS 部署，别手动 scp 上传。</b> 「在生产服务器上 <code>git pull</code> 然后 <code>npm install</code>」是经典踩坑路线：服务器 Node 版本和你不一样、依赖装出来不一致、装一半挂了服务就半死不活。容器化部署（PaaS 帮你 build 镜像）保证「测过的那个产物 == 上线的那个产物」，这正是上一课 Docker 的回报兑现。</div>
+
+<h2><span class="n">5</span>把 LinkPulse 部署到 Render：迁移、健康检查、secrets</h2>
+
+<p>以 <b>Render</b> 为主线走一遍（Railway / Fly.io 思路完全一致，只是面板不同）。Render 检测到仓库里有 <code>Dockerfile</code> 时，每次部署都用 BuildKit 重新构建镜像，并要求 Dockerfile 里有 <code>CMD</code> 或 <code>ENTRYPOINT</code> 来启动应用。<sup><a href="#c4">4</a></sup></p>
+
+<h3 style="margin:1rem 0 .4rem">5.1 健康检查端点：给平台一个「探活」的门铃</h3>
+
+<p><b>健康检查（health check）</b>：平台周期性地请求你应用的某个 URL，根据响应判断这个实例「活没活、能不能接流量」。Render 的规则是——对健康检查路径在 5 秒内返回 <b>2xx / 3xx</b> 即算健康；新版本部署时，只有所有新实例都通过健康检查，Render 才把流量切过去，否则保留旧版本。<sup><a href="#c5">5</a></sup> 这正是<b>零停机滚动发布</b>的底层机制。</p>
+
+<p>给 LinkPulse 加一个 <code>/health</code> 路由（沿用你已有的 Express + Router 分层）：</p>
+
+<pre><code>// src/routes/health.route.ts
+import { Router, type Request, type Response } from 'express';
+import { prisma } from '../db.js';          // 你现有的 PrismaClient 单例
+import { redis } from '../redis.js';         // 你现有的 ioredis 实例
+
+export const healthRouter = Router();
+
+// 浅检查：进程还在跑就回 200。给平台探活用，必须极快、极简。
+healthRouter.get('/health', (_req: Request, res: Response) =&gt; {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
+// 深检查：连带验证依赖（DB / Redis）。给你自己排障用，别给平台探活用。
+healthRouter.get('/health/ready', async (_req: Request, res: Response) =&gt; {
+  try {
+    await prisma.$queryRaw`SELECT 1`;        // 能查通 Postgres
+    await redis.ping();                       // Redis 回 PONG
+    res.status(200).json({ status: 'ready' });
+  } catch (err) {
+    // 依赖挂了 → 回 503，平台会知道这个实例还没准备好接流量
+    res.status(503).json({ status: 'not_ready' });
+  }
+});
+</code></pre>
+
+<div class="note"><b>为什么分浅/深两个端点？</b> 平台探活要用<b>浅检查</b>（<code>/health</code>）：它只问「Node 进程还活着吗」。如果你把 DB 连通性塞进平台探活端点，一旦数据库抖一下，平台会以为<b>所有实例都死了</b>，把它们全部杀掉重启——结果是「DB 短暂抖动」升级成「整个服务雪崩」。深检查（<code>/health/ready</code>）留给你手动排查或更精细的就绪探针。</p></div>
+
+<h3 style="margin:1rem 0 .4rem">5.2 部署时跑迁移：<code>migrate deploy</code> 而非 <code>migrate dev</code></h3>
+
+<p>生产数据库不能用你开发时那套 <code>prisma migrate dev</code>。官方明确：<code>migrate dev</code> 仅供开发，会重置数据库、自动生成新迁移、重新生成 Client——这些行为在生产是灾难。生产必须用 <code>prisma migrate deploy</code>：它<b>只按顺序应用 <code>prisma/migrations/</code> 里已有的迁移文件</b>，跳过 drift 检测、不生成新迁移，可预测、安全，专为 CI/CD 流水线设计。<sup><a href="#c6">6</a></sup></p>
+
+<div class="cmp">
+<div><h4>❌ 生产千万别用</h4>
+<pre><code>prisma migrate dev
+
+· 会比对 schema 自动「造」新迁移
+· 检测到 drift 可能 <b>重置整个库</b>
+· 设计给开发，不给生产</code></pre></div>
+<div><h4>✅ 生产 / CD 用这个</h4>
+<pre><code>prisma migrate deploy
+
+· 只跑已提交的迁移文件
+· 不改 schema、不重置数据
+· 幂等、可预测、可回滚</code></pre></div>
+</div>
+
+<p>在 LinkPulse 的 Dockerfile 启动命令里，先迁移、再启动（迁移失败就让容器启动失败，等于自动拦住坏部署）：</p>
+
+<pre><code># Dockerfile 的启动入口（接上一课的多阶段构建产物）
+# 注意 --import：让 Sentry 在任何业务模块之前初始化（见第 6 节）
+CMD ["sh", "-c", "npx prisma migrate deploy && node --import ./dist/instrument.js dist/server.js"]
+</code></pre>
+
+<p>在 Render 创建服务时（New → Web Service → 选你的仓库），关键填这几项：</p>
+<div class="tree">Runtime          : Docker          ← 用仓库里的 Dockerfile
+Health Check Path: /health         ← 第 5.1 节那个浅检查（必须以 / 开头）
+Environment      : 见 5.3 节       ← DATABASE_URL / REDIS_URL / SECRET 们
+Region           : 选离用户近的</div>
+
+<div class="rw">🌍 <b>实战：迁移要「向后兼容」，才能安全回滚。</b> 滚动发布期间，新旧两版代码会<b>同时</b>连同一个库。所以迁移要做成兼容的：加列要带默认值或允许 NULL；删列分两次发布（先发「代码不再用它」的版本，下次再真删列）。这样万一新版本出问题，你能一键把代码<b>回滚到上一个镜像</b>而不必回滚数据库——Render / Railway 都在面板上提供「Rollback 到上个 deploy」，前提是你的数据库 schema 对旧代码仍然友好。</div>
+
+<h3 style="margin:1rem 0 .4rem">5.3 secrets 管理：绝不进 git</h3>
+
+<p><b>secret（密钥）</b>指任何泄露就出事的东西：数据库密码、JWT 密钥、Stripe key、Sentry DSN。铁律一条：<b>secret 永远不进 git</b>。<code>.env</code> 必须在 <code>.gitignore</code> 里，仓库只提交一个 <code>.env.example</code>（列出键名、不含真值）。</p>
+
+<p>真值放在两个地方，按用途分：</p>
+<ul>
+<li><b>CI 阶段</b>（GitHub Actions 里要用的，比如部署钩子 token）→ 放 <b>GitHub Secrets</b>（仓库 Settings → Secrets and variables → Actions），在 workflow 里用 <code>${{ secrets.NAME }}</code> 读取，日志里会自动被打码成 <code>***</code>。</li>
+<li><b>运行时</b>（应用跑起来要用的，比如 <code>DATABASE_URL</code>、<code>SENTRY_DSN</code>）→ 放 <b>平台环境变量</b>（Render 的 Environment 面板 / Railway 的 Variables）。容器启动时平台把它们注入为环境变量，你代码里照旧 <code>process.env.X</code> 读。</li>
+</ul>
+
+<pre><code># .env.example  ←  这个进 git（只有键名，没有真值）
+DATABASE_URL=postgresql://user:password@host:5432/linkpulse
+REDIS_URL=redis://host:6379
+JWT_SECRET=replace-me
+SENTRY_DSN=replace-me
+</code></pre>
+
+<div class="rw">🌍 <b>实战：密钥一旦进过 git，删掉也等于已泄露。</b> git 历史是永久的——<code>git rm</code> 删掉文件，旧 commit 里的密钥照样能翻出来。所以正确动作是：① 立刻在源头<b>吊销并轮换</b>那个 key（DB 改密码、Stripe roll key）；② 再清理历史。永远别指望「悄悄删掉就没事」。把 <code>.env</code> 早早加进 <code>.gitignore</code>，是防住这类事故最便宜的一步。</div>
+
+<h2><span class="n">6</span>可观测性：Sentry 抓异常、日志、metrics</h2>
+
+<p>上线只是开始，「上线后它到底好不好」要靠<b>可观测性（observability）</b>回答。三大支柱，先建立词汇：</p>
+<ul>
+<li><b>Logs（日志）</b>：一条条带时间戳的事件记录。你已经在用 <b>pino</b> 输出结构化 JSON 日志——上 PaaS 后，平台会自动收集 stdout，在面板里就能看（这也是为什么日志要写 stdout，别写文件）。</li>
+<li><b>Metrics（指标）</b>：可聚合的数值时间序列，比如「每分钟请求数」「p95 响应延迟」「错误率」。回答「系统整体健不健康」。Render 等平台自带基础 CPU/内存/请求 metrics。</li>
+<li><b>Error tracking（错误追踪）</b>：把线上抛出的异常<b>聚合、去重、附上堆栈和上下文、并告警</b>。这正是 <b>Sentry</b> 干的事。</li>
+</ul>
+
+<p>区别在于：日志是「大海捞针」，metrics 是「体温计」，而 Sentry 是「线上崩了立刻拍你肩膀，还把案发现场打包好」。给 LinkPulse 接 Sentry。</p>
+
+<p><b>第一步：装 SDK，写初始化文件。</b> Sentry 官方要求：<code>Sentry.init()</code> 必须在<b>任何其它业务模块被加载之前</b>执行，否则它对 Express、Postgres 这些库的自动埋点（auto-instrumentation）就挂不上钩。所以单独建一个 <code>instrument.ts</code>。<sup><a href="#c7">7</a></sup></p>
+
+<pre><code>// src/instrument.ts  ←  必须最先执行
+import * as Sentry from '@sentry/node';
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,        // DSN 从平台环境变量来，绝不硬编码
+  environment: process.env.NODE_ENV,  // 区分 production / staging
+  tracesSampleRate: 0.1,              // 采样 10% 的请求做性能追踪（省额度）
+});
+</code></pre>
+
+<p><b>第二步：在应用里挂错误处理器。</b> Express 应用中，路由全部定义完之后、在你自己的错误中间件之前，调用 <code>Sentry.setupExpressErrorHandler(app)</code>，它会捕获冒泡上来的异常并上报。<sup><a href="#c7">7</a></sup></p>
+
+<pre><code>// src/server.ts
+import express from 'express';
+import { healthRouter } from './routes/health.route.js';
+import { linkRouter } from './routes/link.route.js';
+import * as Sentry from '@sentry/node';
+import { errorHandler } from './middleware/error.js';  // 你现有的 4 参数错误中间件
+
+const app = express();
+app.use(express.json());
+
+app.use(healthRouter);     // /health 不需要鉴权，放最前
+app.use(linkRouter);       // LinkPulse 的业务路由
+
+// 1) 先让 Sentry 捕获 + 上报，再走你自己的错误处理
+Sentry.setupExpressErrorHandler(app);
+// 2) 你原有的 4 参数错误中间件：决定返回给用户的响应
+app.use(errorHandler);
+
+const port = Number(process.env.PORT) || 3000;
+app.listen(port, () =&gt; console.log(`LinkPulse on :${port}`));
+</code></pre>
+
+<p><b>第三步：保证 <code>instrument</code> 最先加载。</b> 在 ESM 项目里，官方推荐用 Node 的 <code>--import</code> 标志，让初始化文件在主模块之前执行（正是第 5.2 节 <code>CMD</code> 里写的 <code>node --import ./dist/instrument.js dist/server.js</code>）。<sup><a href="#c7">7</a></sup></p>
+
+<div class="rw">🌍 <b>实战：Sentry 抓线上异常并主动告警。</b> 没接 Sentry 时，线上 500 错误你只能等用户来骂、或自己半夜翻日志。接上之后：用户一触发未捕获异常，Sentry 立刻聚合同类错误（不会 1000 个用户给你刷 1000 封邮件），附上完整堆栈、请求参数、用户信息，并按你配置的规则发 Slack / 邮件告警。把 <code>SENTRY_DSN</code> 放进平台环境变量、采样率从 <code>0.1</code> 起步控成本——这是单人 SaaS 性价比最高的一块基建。</div>
+
+<div class="note"><b>把它们串起来看：</b> CI（第 2-3 节）保证「合进 main 的代码是测过的」→ 平台从 Dockerfile 构建并用 <code>/health</code> 滚动发布（第 5 节）→ <code>migrate deploy</code> 安全升级数据库 → 上线后 pino 日志 + 平台 metrics + Sentry 错误追踪（第 6 节）让你「看得见」。这就是一条完整的、单人也扛得住的生产闭环。</p></div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">CI/CD</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">在 LinkPulse 的部署流程里，应该用哪个命令把数据库迁移应用到生产环境？</p>
+  <button class="opt" data-correct="true" data-ex="对。migrate deploy 只按顺序应用已提交的迁移文件，跳过 drift 检测、不生成新迁移、不重置数据，专为 CI/CD 与生产环境设计。">部署时运行 <code>prisma migrate deploy</code></button>
+  <button class="opt" data-correct="false" data-ex="错。migrate dev 仅供开发：它会比对 schema 自动生成新迁移，检测到 drift 时甚至会重置整个数据库——在生产是灾难。">部署时运行 <code>prisma migrate dev</code></button>
+  <button class="opt" data-correct="false" data-ex="错。db push 直接把 schema 推到库、不走迁移历史，无法回滚也无法审计，不适合生产。">部署时运行 <code>prisma db push</code> 直接同步 schema</button>
+  <button class="opt" data-correct="false" data-ex="错。手动连生产库执行 SQL 既不可复现也极易出错，正是 CI/CD 要消灭的操作。">SSH 进生产库手动执行 SQL 改表</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task"><h3>⌨️ 动手：给 LinkPulse 搭起 CI/CD 并上线</h3>
+<ol>
+<li>新建 <code>.github/workflows/ci.yml</code>，按第 2 节写好：push/PR 到 main 触发 → <code>checkout</code> → <code>setup-node@v4</code>(node 20, cache npm) → <code>npm ci</code> → <code>prisma generate</code> → <code>lint</code> → 用 Postgres service container 跑 <code>migrate deploy</code> → <code>npm test</code> → <code>npm run build</code>。push 上去，在仓库 Actions 标签页看它跑绿。</li>
+<li>在 Settings → Branches 给 <code>main</code> 开分支保护，把 <code>test</code> job 设为<b>必需状态检查</b>。故意改坏一个测试、发个 PR，确认「Merge」按钮变灰。</li>
+<li>给 Express 加 <code>/health</code>（浅）和 <code>/health/ready</code>（深，查 DB + Redis）两个端点。</li>
+<li>在 Render 新建 Web Service：Runtime 选 Docker、Health Check Path 填 <code>/health</code>；在 Environment 里配 <code>DATABASE_URL</code> / <code>REDIS_URL</code> / <code>JWT_SECRET</code> / <code>SENTRY_DSN</code>（都从平台注入，不进 git）。Dockerfile 的 <code>CMD</code> 改成「先 <code>migrate deploy</code> 再启动」。</li>
+<li><code>npm i @sentry/node</code>，按第 6 节加 <code>src/instrument.ts</code>，在 <code>server.ts</code> 调 <code>Sentry.setupExpressErrorHandler(app)</code>，启动命令用 <code>node --import ./dist/instrument.js dist/server.js</code>。</li>
+<li>部署成功后，访问 <code>https://你的服务.onrender.com/health</code> 应返回 <code>{"status":"ok"}</code>；故意在某路由 <code>throw new Error('boom')</code> 触发一次，去 Sentry 后台确认抓到了这条异常。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://docs.github.com/actions/guides/building-and-testing-nodejs" target="_blank" rel="noopener">GitHub Docs · Building and testing Node.js</a>。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> ① 你的 Actions 跑绿的截图（或 workflow run 链接）；② <code>https://...onrender.com/health</code> 的返回；③ Sentry 后台里那条 <code>boom</code> 异常的截图。<br><strong>下一课预告：</strong> Lesson 0026 接入 <b>Stripe</b> 做订阅计费，把 users 表里那个 <code>plan</code> 字段用起来，LinkPulse 正式开始收费上线。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://docs.github.com/actions/guides/building-and-testing-nodejs" target="_blank" rel="noopener">GitHub Docs — Building and testing Node.js</a>（workflow / job / step 结构，setup-node 推荐用法与 npm ci/test/build）</li>
+    <li id="c2"><a href="https://github.com/actions/setup-node" target="_blank" rel="noopener">actions/setup-node</a>（node-version 与 cache 配置）</li>
+    <li id="c3"><a href="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule" target="_blank" rel="noopener">GitHub Docs — Managing a branch protection rule</a>（Require status checks to pass before merging；job 名需唯一）</li>
+    <li id="c4"><a href="https://render.com/docs/docker" target="_blank" rel="noopener">Render Docs — Docker</a>（从 Dockerfile 构建，需 CMD/ENTRYPOINT）</li>
+    <li id="c5"><a href="https://render.com/docs/health-checks" target="_blank" rel="noopener">Render Docs — Health Checks</a>（健康检查路径、2xx/3xx 内 5 秒、零停机发布逻辑）</li>
+    <li id="c6"><a href="https://www.prisma.io/docs/orm/prisma-migrate/workflows/development-and-production" target="_blank" rel="noopener">Prisma Docs — Development and production / migrate deploy</a>（migrate deploy 用于生产，migrate dev 仅供开发）</li>
+    <li id="c7"><a href="https://docs.sentry.io/platforms/javascript/guides/express/" target="_blank" rel="noopener">Sentry Docs — Express</a>（init 须最先执行、setupExpressErrorHandler、ESM 用 --import）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0025 · 上一课 <a href="0024-dockerize.html">Docker 化 LinkPulse</a> · 下一课（预告）：<em>Stripe 订阅计费与上线</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0003 · HTTP 基础与你的第一个服务器</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  .anatomy{display:grid; grid-template-columns:1fr 1fr; gap:.8rem; margin:1.2rem 0}
+  .acard{border:1px solid var(--rule); border-radius:8px; padding:.8rem .95rem; background:#fffefb}
+  .acard h4{margin:0 0 .5rem; font-size:.95rem}
+  .acard.req h4{color:#2e6e8e}
+  .acard.res h4{color:var(--accent)}
+  .acard ul{margin:.3rem 0 0; padding-left:1.1rem; font-size:.84rem}
+  .acard li{margin:.4rem 0}
+  .acard .m{font-family:"SF Mono",Menlo,monospace; font-size:.82em; background:var(--code-bg); padding:.05em .3em; border-radius:3px}
+  .flip{background:#eef3f7; border-left:3px solid #2e6e8e; padding:.7rem 1rem; border-radius:4px; margin:1.2rem 0; font-size:.92rem}
+  @media(max-width:480px){ .anatomy{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0003 / 阶段 1</span>
+</nav>
+
+<div class="kicker">Lesson 0003 · Node.js 后端之路</div>
+<h1>HTTP 基础，与你的<br>第一个服务器（原生 <code>http</code> 模块）</h1>
+
+<div class="mission">
+  <b>LinkPulse 的第一次心跳。</b> 任何后端产品的起点，都是一个能<strong>接收请求、做出响应</strong>的服务器。
+  今天你写的这十几行，就是 LinkPulse 的骨架——后面的短链跳转、API、数据分析全长在它上面。
+  我们<strong>先不用框架</strong>，这样以后用 Express 时，你会清楚它到底替你做了什么。
+</div>
+
+<h2><span class="n">1</span>先翻转视角：你现在是「服务器」</h2>
+<p>
+  HTTP 你在前端早就接触过——用 <code>fetch</code> 发请求、在 DevTools 的 Network 面板看请求和响应。现在<strong>视角要翻转</strong>：
+</p>
+<div class="flip">
+  以前你是<strong>客户端</strong>（发请求、收响应）；现在你写的是<strong>服务器</strong>（<strong>收</strong>请求、<strong>发</strong>响应）。
+  同一段 HTTP「对话」，你站到了另一头。
+</div>
+<p>一次 HTTP「对话」由两部分组成，各自的「零件」如下（这些你在前端见过，这里快速过一遍，重点是它们在后端的含义）：</p>
+<div class="anatomy">
+  <div class="acard req">
+    <h4>📨 请求 Request（你收到的）</h4>
+    <ul>
+      <li><b>方法 method</b>：想干什么。<span class="m">GET</span> 取数据、<span class="m">POST</span> 提交新数据、<span class="m">PUT</span> 更新、<span class="m">DELETE</span> 删除。</li>
+      <li><b>路径 path</b>：访问哪个地址，如 <span class="m">/</span>、<span class="m">/api/health</span>。</li>
+      <li><b>请求头 headers</b>：附加说明，如 <span class="m">Content-Type</span>、<span class="m">Authorization</span>。</li>
+      <li><b>请求体 body</b>：随请求带的数据（多见于 POST），可选。</li>
+    </ul>
+  </div>
+  <div class="acard res">
+    <h4>📤 响应 Response（你发出的）</h4>
+    <ul>
+      <li><b>状态码 status</b>：结果如何。<span class="m">2xx</span> 成功(200)、<span class="m">4xx</span> 客户端错(404 找不到)、<span class="m">5xx</span> 服务端错(500)。</li>
+      <li><b>响应头 headers</b>：如 <span class="m">Content-Type</span> 告诉对方「我返回的是 JSON 还是 HTML」。</li>
+      <li><b>响应体 body</b>：真正返回的内容（文本、JSON、HTML…）。</li>
+    </ul>
+  </div>
+</div>
+<p class="note">
+  🔑 <b>关键转变：</b>以前这些值是别人定的、你只负责读；现在<strong>作为服务器，是你来决定</strong>——返回什么状态码、什么响应头、什么内容。下面三节就是学怎么「读请求」和「定响应」。
+</p>
+
+<h2><span class="n">2</span>服务器骨架：<code>createServer</code></h2>
+<p>Node 内置 <code>http</code> 模块，一个函数就能起服务器。最小可运行版本：</p>
+<pre><code>// 01-node-core/first-server.js
+const http = require('node:http')
+
+const server = http.createServer((req, res) =&gt; {
+  res.statusCode = 200
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+  res.end('你好，这是我的第一个 Node 服务器！🎉')
+})
+
+server.listen(3000, () =&gt; {
+  console.log('服务器已启动：http://localhost:3000')
+})</code></pre>
+<ul>
+  <li><code>http.createServer(handler)</code> 创建服务器。<strong>每来一个请求，这个 handler 就被调用一次</strong>，所以它叫「请求处理器」<sup><a href="#c1">1</a></sup>。</li>
+  <li>handler 拿到两个对象：<code>req</code>（你收到的请求）和 <code>res</code>（你要发出的响应）。</li>
+  <li><code>server.listen(3000)</code> 让服务器<strong>开始监听</strong> 3000 端口。不调用它，服务器不工作<sup><a href="#c1">1</a></sup>。</li>
+</ul>
+<div class="note">
+  🔗 <b>接上前两课：</b>这个 <code>(req, res) =&gt; {...}</code> 回调，正是<strong>事件循环里被调用的回调</strong>。每来一个请求，事件循环就调用它一次——单线程、靠事件循环，就能源源不断地处理请求。地基用上了。
+</div>
+
+<h2><span class="n">3</span>读请求：<code>req</code></h2>
+<p><code>req</code> 是 <code>http.IncomingMessage</code>（本质是个<strong>可读流</strong>，下节接收 POST body 时会用到）。最常用三样，对应上面「请求」的零件：</p>
+<pre><code>req.method    // 方法："GET" / "POST" ...
+req.url       // 路径，如 "/" 或 "/api/health"（不含域名和端口）
+req.headers   // 请求头对象，如 req.headers['user-agent']</code></pre>
+
+<h2><span class="n">4</span>定响应：<code>res</code></h2>
+<p><code>res</code> 是 <code>http.ServerResponse</code>，你用它「写回」。一次响应分三步：<strong>状态码 → 响应头 → 响应体</strong>：</p>
+<pre><code>res.writeHead(200, { 'Content-Type': 'application/json' })  // 状态码 + 响应头，一步到位
+// 等价于：res.statusCode = 200; res.setHeader('Content-Type', 'application/json')
+
+res.write('部分内容')      // 可选、可多次，往响应体里写
+res.end('最后的内容')      // 结束响应并发送；⚠️ 每个请求只能调用一次</code></pre>
+<p>⚠️ <strong><code>res.end()</code> 每个请求只能调用一次</strong>，表示「响应到此结束、发出去」。忘了调用，客户端会一直转圈等<sup><a href="#c2">2</a></sup>。</p>
+
+<h2><span class="n">5</span>路由（Routing）：把不同请求分发到不同处理</h2>
+<p>
+  <strong>什么是路由？</strong> 一个服务器要处理很多种请求：访问首页、做健康检查、获取某条短链、创建新短链……它们显然不能都返回同一个东西。
+  <strong>路由（routing），就是根据请求的「方法 + 路径」，决定该运行哪段代码、返回什么响应。</strong>
+</p>
+<p>
+  打个比方 🏢：路由像公司<strong>前台接待</strong>——根据来访者<strong>要找谁</strong>（路径 <code>/api/health</code>）和<strong>要干什么</strong>（方法 <code>GET</code>/<code>POST</code>），把他们引到不同的房间办不同的事。
+</p>
+<p>最朴素的路由，就是用 <code>if / else</code> 判断 <code>req.url</code> 和 <code>req.method</code>：</p>
+<pre><code>const http = require('node:http')
+
+const server = http.createServer((req, res) =&gt; {
+  console.log(`${req.method} ${req.url}`)               // 每个请求打印一行
+
+  if (req.url === '/' &amp;&amp; req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+    res.end('首页')
+  } else if (req.url === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }))
+  } else {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+    res.end('404 - 没有这个页面')
+  }
+})
+
+server.listen(3000, () =&gt; console.log('http://localhost:3000'))</code></pre>
+<p>逐条读这个「前台」逻辑：</p>
+<ul>
+  <li>方法是 <code>GET</code>、路径是 <code>/</code> → 返回纯文本「首页」，状态码 <strong>200</strong>。</li>
+  <li>路径是 <code>/api/health</code> → 返回一段 <strong>JSON</strong>（注意响应头 <code>Content-Type</code> 改成了 <code>application/json</code>，告诉对方「我给的是 JSON」）。</li>
+  <li>其它任何路径 → 返回 <strong>404</strong>，告诉客户端「没这个页面」。</li>
+</ul>
+<div class="note">
+  💡 <b>你可能已经想到：</b>请求种类一多，这堆 <code>if/else</code> 会变得又长又乱。没错——这正是 <strong>Express 等框架</strong>要解决的问题（它让你写成 <code>app.get('/api/health', …)</code> 这样优雅地定义路由）。我们故意<strong>先用原生写法体会到痛点</strong>，等阶段 2 学框架时，你才会真切知道它好在哪。
+</div>
+<p class="note">
+  📦 <b>关于 <code>require</code>：</b>这里用 <code>require('node:http')</code>（CommonJS），不用任何配置、<code>node 文件名</code> 直接能跑。它和你前端常用的 <code>import</code>（ESM）的区别，是<strong>下一课</strong>的主题，到时我们一起把项目正式搭起来。一次只学一个新东西。
+</p>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">温故知新</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">服务器启动后，每当有人访问，<code>createServer((req,res)=&gt;{})</code> 里的回调函数会——</p>
+  <button class="opt" data-correct="true"  data-ex="对！每个请求都会让事件循环调用一次这个回调——这正是前两课事件循环知识的实际应用。">每来一个请求，就被事件循环调用一次</button>
+  <button class="opt" data-correct="false" data-ex="不对。它在服务器整个运行期间会被反复调用，每个请求一次，而不是只在启动时跑一次。">在服务器整个生命周期里只执行一次</button>
+  <button class="opt" data-correct="false" data-ex="不对。它由『请求』触发，不是按时间定时触发的。没有请求时它根本不会跑。">每隔一秒被自动调用一次</button>
+  <button class="opt" data-correct="false" data-ex="不对。正常请求就会触发它，并不需要等到出错。">只有在请求出错时才会被调用</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：跑起你的第一个后端服务（10 分钟）</h3>
+  <ol>
+    <li>新建 <code>01-node-core/first-server.js</code>，抄入上面的「<strong>骨架版</strong>」代码（§2）。</li>
+    <li>终端运行 <code>node 01-node-core/first-server.js</code> → 看到「服务器已启动」。</li>
+    <li>浏览器打开 <a href="http://localhost:3000" target="_blank">http://localhost:3000</a> → 看到问候语。🎉 <strong>你跑起了人生第一个后端服务！</strong></li>
+    <li>另开终端运行 <code>curl http://localhost:3000</code> → 看到同样内容（没有浏览器时就这样测后端）。</li>
+    <li>把代码换成「<strong>路由版</strong>」（§5），重启后分别访问 <code>/</code>、<code>/api/health</code>、<code>/随便什么</code>，观察响应和状态码的不同。</li>
+    <li>看运行服务器的终端：每次访问都打印一行 <code>GET /xxx</code> —— 这就是事件循环在帮你调用回调。</li>
+    <li>按 <code>Ctrl + C</code> 停止服务器。</li>
+  </ol>
+  <p style="font-size:.86rem;margin:.6rem 0 0;color:var(--muted)">💡 改了代码要重启；嫌烦可用 Node 内置自动重启：<code>node --watch 01-node-core/first-server.js</code>。</p>
+</div>
+
+<div class="src">
+  📖 <strong>本课首选精读源</strong>：
+  <a href="https://nodejs.org/learn/http/anatomy-of-an-http-transaction" target="_blank" rel="noopener">Node.js 官方 — Anatomy of an HTTP Transaction</a>
+  （把一次请求-响应从头到尾讲透）；API 速查见
+  <a href="https://nodejs.org/api/http.html" target="_blank" rel="noopener">http 模块文档</a>。
+</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑通后把这些发我：</b>① 浏览器看到的内容；② 访问 <code>/api/health</code> 拿到的 JSON；③ 运行服务器的终端打印的请求日志。
+  有任何报错（端口被占、命令找不到…）直接贴给我。<br>
+  <strong>下一课预告（0004）：</strong>模块系统 <code>import</code> vs <code>require</code> + 用 <code>npm</code> 把这些零散文件变成一个正式项目。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://nodejs.org/learn/http/anatomy-of-an-http-transaction" target="_blank" rel="noopener">Node.js 官方 — Anatomy of an HTTP Transaction</a>（createServer/请求处理器、req.method/req.url、listen）</li>
+    <li id="c2"><a href="https://nodejs.org/api/http.html" target="_blank" rel="noopener">Node.js 官方 — HTTP 模块 API 文档</a>（writeHead / write / end，end 每请求一次）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0003 · 上一课 <a href="0002-event-loop-internals-visual.html">0002 — 事件循环内部机制</a> · 下一课（预告）：<em>0004 — 模块系统 + 搭建正式项目</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0001 · Node 的本质与执行顺序</title>
+<link rel="stylesheet" href="lesson.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0001 / 阶段 1</span>
+</nav>
+
+<div class="kicker">Lesson 0001 · Node.js 后端之路</div>
+<h1>Node 的本质：单线程、非阻塞 I/O，<br>与代码的执行顺序</h1>
+
+<div class="mission">
+  <b>为什么先学这个？</b> 你的目标是独立做出 <b>LinkPulse</b>（短链接 + 访问分析 SaaS）。
+  当成千上万人同时点击短链时，你的服务器凭什么用<strong>一个</strong>线程就扛得住？答案就藏在「事件循环」里。
+  搞懂它，你才能写出不会「卡死」整台服务器的后端代码——这是后端并发的第一块基石。
+</div>
+
+<h2><span class="n">1</span>Node 到底是什么</h2>
+<p>
+  先纠正一个常见误解：<strong>Node.js 不是一门语言，也不是一个框架</strong>，而是一个
+  <strong>JavaScript 运行时（runtime）</strong>。官方定义：
+</p>
+<p style="padding-left:1rem;border-left:2px solid var(--rule);color:#444;font-style:italic">
+  “Node.js® is a free, open-source, cross-platform JavaScript runtime environment that lets developers
+  create servers, web apps, command line tools and scripts.”<sup><a href="#c1">1</a></sup>
+</p>
+<p>
+  它把 Chrome 用的 <strong>V8 引擎</strong>搬到了浏览器之外，让 JS 能在服务器上运行<sup><a href="#c1">1</a></sup>。
+  你已经会写的 JS，现在可以用来写服务器了——这就是你从前端跨到后端最大的「现成优势」。
+</p>
+<p class="note">
+  心智模型：<code>V8</code>（执行你的 JS）＋ <code>libuv</code>（一个 C 库，负责事件循环和与操作系统打交道的异步 I/O）＝ Node 运行时。
+</p>
+
+<h2><span class="n">2</span>核心直觉：单线程，却不阻塞</h2>
+<p>
+  关键事实：<strong>一个 Node 应用跑在单个进程里，不会为每个请求都新建线程</strong><sup><a href="#c1">1</a></sup>。
+  这听起来很反直觉——只有一个线程，怎么同时服务很多用户？
+</p>
+<p>
+  诀窍在于：后端的工作大多是 <strong>I/O</strong>（读数据库、读文件、等网络），而 I/O 是「<em>等</em>」的过程。
+  如果像传统同步代码那样「等」，这一个线程就被占住、谁也服务不了。Node 的做法是——
+  <strong>把「等」这件事外包出去，自己立刻去处理下一个请求</strong>。等结果回来了，再回头处理。
+</p>
+<div class="note">
+  🔗 <b>映射到 LinkPulse：</b>用户点击短链 → 你要查数据库拿到原始网址 → 这一步要「等」数据库。
+  在等的这几毫秒里，单线程的 Node 不会干等，而是继续处理别人的点击。这就是它能高并发的原因。
+</div>
+
+<h2><span class="n">3</span>事件循环：把慢操作「外包」给内核</h2>
+<p>
+  让这一切运转起来的机制，就叫 <strong>事件循环（Event Loop）</strong>。官方解释（请逐字读一遍）：
+</p>
+<p style="padding-left:1rem;border-left:2px solid var(--rule);color:#444;font-style:italic">
+  “The event loop is what allows Node.js to perform non-blocking I/O operations — despite the fact that a
+  single JavaScript thread is used by default — by offloading operations to the system kernel whenever
+  possible.”<sup><a href="#c2">2</a></sup>
+</p>
+<p>
+  翻译成人话：遇到慢操作（读文件、查数据库），Node 把它<strong>交给操作系统内核</strong>去后台处理，自己继续往下跑。
+  内核干完后会通知 Node，于是<strong>对应的回调函数（callback）被排进队列，等着被执行</strong><sup><a href="#c2">2</a></sup>。
+  事件循环就是那个「不停地从队列里取出已就绪的回调来执行」的循环。
+</p>
+
+<h2><span class="n">4</span>你要掌握的技能：预测执行顺序</h2>
+<p>
+  既然回调是「排队」执行的，那它们的<strong>先后顺序</strong>就有讲究。这是面试爱问、写代码也常踩的点。
+  记住这条<strong>优先级链</strong>：
+</p>
+<pre><code>① 同步代码        → 立即执行（在调用栈上，从上到下）
+② 微任务 microtask → 同步代码跑完后、立刻清空
+      ├─ process.nextTick(...)   ← Node 里优先级最高
+      └─ Promise.then/catch/finally
+③ 宏任务 macrotask → 微任务清空后，进入事件循环各阶段
+      └─ setTimeout / setImmediate / I/O 回调 ...</code></pre>
+<p>
+  规则：<strong>同步 → 微任务 → 宏任务</strong>。微任务（Promise）总是<em>排在</em>下一个宏任务（如 <code>setTimeout</code>）<em>之前</em>被执行完<sup><a href="#c3">3</a></sup>。
+  而在 Node 里，<code>process.nextTick</code> 又比 <code>Promise</code> 更优先——它会在「当前这步操作结束后、事件循环继续之前」就被清空<sup><a href="#c2">2</a></sup>。
+</p>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 预测一下输出顺序 <span class="pill">动手</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">下面这段代码在 Node 里运行，打印顺序是？</p>
+  <pre><code>console.log('A')
+setTimeout(() =&gt; console.log('B'), 0)
+Promise.resolve().then(() =&gt; console.log('C'))
+process.nextTick(() =&gt; console.log('D'))
+console.log('E')</code></pre>
+  <button class="opt" data-correct="false" data-ex="C 是 Promise 微任务，D 是 nextTick。在 Node 里 nextTick 比 Promise 更优先，所以 D 应在 C 之前。">A → E → C → D → B</button>
+  <button class="opt" data-correct="true"  data-ex="完全正确！同步先跑 A、E；再清微任务，nextTick(D) 先于 Promise(C)；最后才是宏任务 setTimeout(B)。">A → E → D → C → B</button>
+  <button class="opt" data-correct="false" data-ex="setTimeout 是宏任务，必须等同步代码和所有微任务都跑完才执行，不可能排在第 2 个。">A → B → C → D → E</button>
+  <button class="opt" data-correct="false" data-ex="方向对了一半：同步(A,E)和 nextTick(D) 没错，但 Promise(C) 是微任务，要排在宏任务 setTimeout(B) 之前。">A → E → D → B → C</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<details>
+  <summary>🔁 主动回忆：合上课件，用一句话回答</summary>
+  <p style="font-size:.9rem"><strong>问：</strong>为什么 Node.js 用单线程也能同时服务成千上万的用户？</p>
+  <p style="font-size:.9rem"><strong>参考答案：</strong>因为后端工作大多是「等待型」的 I/O，Node 把这些慢操作外包给操作系统内核去后台处理，
+  单线程不干等、立刻去处理下一个请求；结果就绪后再通过事件循环执行对应回调——所以一个线程也能高并发<sup><a href="#c2">2</a></sup>。</p>
+  <p class="note" style="margin-bottom:0">💡 能用自己的话说出来，比「看懂了」更重要——这是把知识从「短期流畅」变成「长期记住」的关键。</p>
+</details>
+
+<div class="task">
+  <h3>⌨️ 亲手验证（5 分钟）</h3>
+  <ol>
+    <li>先确认环境：终端运行 <code>node -v</code>。能看到版本号（如 <code>v22.x</code>）就 OK；没有的话告诉我，我带你装。</li>
+    <li>在仓库里新建文件 <code>00-warmup/event-loop-demo.js</code>，把上面那段代码抄进去。</li>
+    <li>运行 <code>node 00-warmup/event-loop-demo.js</code>，看打印顺序是否和你预测的一致。</li>
+    <li><strong>挑战：</strong>在 <code>process.nextTick</code> 里再嵌一个 <code>Promise.resolve().then(...)</code>，猜猜它会插在哪里？跑出来验证。</li>
+  </ol>
+</div>
+
+<div class="src">
+  📖 <strong>本课首选精读源</strong>（最高质量、最权威）：
+  <a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick" target="_blank" rel="noopener">
+  Node.js 官方 — The Node.js Event Loop, Timers, and <code>process.nextTick()</code></a>。
+  读前 1/3 即可，重点看事件循环的定义和 <code>nextTick</code> 部分。
+</div>
+
+<div class="ask">
+  👩‍🏫 <b>我是你的老师，随时提问。</b> 哪怕是「调用栈是什么」「微任务队列存在哪」这种基础问题都可以问。
+  跑完上面的动手题，把你的<strong>输出结果</strong>或<strong>任何疑惑</strong>发给我，我们据此决定下一课。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://nodejs.org/en/about" target="_blank" rel="noopener">Node.js 官方 — About Node.js®</a>（运行时定义、V8、单进程单线程模型）</li>
+    <li id="c2"><a href="https://nodejs.org/learn/asynchronous-work/event-loop-timers-and-nexttick" target="_blank" rel="noopener">Node.js 官方 — The Node.js Event Loop, Timers, and process.nextTick()</a>（事件循环定义、内核外包、nextTick 时机）</li>
+    <li id="c3"><a href="https://javascript.info/event-loop" target="_blank" rel="noopener">javascript.info — Event loop: microtasks and macrotasks</a>（微任务先于宏任务）；另见 <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model" target="_blank" rel="noopener">MDN — JavaScript execution model</a></li>
+  </ol>
+  <p style="margin-top:1rem">
+    Lesson 0001 ·
+    下一课：<em><a href="0002-event-loop-internals-visual.html">0002 — 事件循环内部机制（图解）</a></em> ·
+    本课对应路线图 <strong>阶段 1：Node 核心 + 网络</strong>
+  </p>
+</footer>
+
+<script src="lesson.js"></script>
+
+</body>
+</html>

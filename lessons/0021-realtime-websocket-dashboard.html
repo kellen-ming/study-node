@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0021 · 实时点击看板：WebSocket 与 SSE</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：三方案对比表与连线动画 */
+.matrix{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+.matrix th,.matrix td{border:1px solid var(--border,#3a3a3a);padding:.55rem .7rem;text-align:left;vertical-align:top}
+.matrix th{background:rgba(120,160,255,.12);font-weight:600}
+.matrix td.good{color:#5fd38b}
+.matrix td.bad{color:#ff8b8b}
+.matrix td.meh{color:#e0c060}
+.flowbox{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin:.8rem 0;font-size:.85rem}
+.flowbox .node{border:1px solid var(--border,#3a3a3a);border-radius:8px;padding:.4rem .7rem;background:rgba(255,255,255,.03)}
+.flowbox .arrow{opacity:.6}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0021 / 阶段 5</span></nav>
+<div class="kicker">Lesson 0021 · Node.js 后端之路</div>
+<h1>实时点击看板：WebSocket 与 SSE</h1>
+
+<div class="mission"><b>为什么学这个？</b> LinkPulse 现在能创建短链、跳转、缓存，上一课我们还把「点击落库 + 计数」搬进了后台队列异步处理。但用户花钱买的 SaaS，往往最爱盯着一块东西看——<b>仪表盘上的实时点击数</b>。问题是：HTTP 的本质是「客户端问、服务端答」，服务端没法主动把「刚刚又有人点了你的链接」推给浏览器。本章我们补上后端工程师必备的一块拼图：<b>服务端主动推送</b>。你将搞懂轮询 / SSE / WebSocket 三种方案的取舍，用 <code>ws</code> 给 LinkPulse 建一条实时通道，让 worker 处理完一次点击就广播给所有看板页面，做出一个会跳动的实时点击看板。</div>
+
+<h2><span class="n">1</span>为什么 HTTP 推不动：先认清问题</h2>
+
+<p>你做前端时调接口，流程永远是：浏览器发 <code>fetch()</code> → 服务器返回 → 连接关闭。这就是 HTTP 的<b>请求-响应模型（request-response）</b>：必须由客户端先「问」，服务端才能「答」，答完连接就断了。服务端<b>无法</b>在没人问的时候主动找上门说「喂，数据变了」。</p>
+
+<p>对大多数页面这没问题。但「实时点击看板」要的恰恰相反——数据在<b>服务端</b>先变（某人点了短链，worker 算出新计数），我们希望它<b>立刻</b>出现在所有正在看看板的浏览器上。HTTP 原生做不到这件事，于是工程上演化出三条路。</p>
+
+<div class="rw">🌍 <b>实战：</b>不要一上来就「实时 = WebSocket」。先问自己两个问题：<b>谁推给谁？</b>（只有服务端→客户端单向，还是双向交互）<b>多频繁？</b>（每分钟一次 vs 每秒几十条）。答错选型，代价是把一个本可以三行 SSE 搞定的需求，做成需要心跳、重连、鉴权、集群广播的 WebSocket 工程。</div>
+
+<h2><span class="n">2</span>三种方案对比：轮询 vs SSE vs WebSocket</h2>
+
+<h3 style="margin-bottom:.3rem">① 轮询 Polling：用 HTTP 硬凑实时</h3>
+<p>既然服务端不能主动推，那就让客户端<b>反复问</b>。每隔几秒发一次请求拉最新数据，这叫<b>短轮询（short polling）</b>。它什么新技术都不用，前端一个 <code>setInterval</code> 就行：</p>
+<pre><code>// 前端：每 3 秒问一次后端「现在点击数多少」
+setInterval(async () =&gt; {
+  const res = await fetch('/api/links/abc123/stats');
+  const { clickCount } = await res.json();
+  document.querySelector('#count').textContent = String(clickCount);
+}, 3000);</code></pre>
+<p>缺点很明显：<b>延迟</b>（最坏要等满一个间隔才看到变化）和<b>浪费</b>（99% 的请求拉回来发现没变化，纯属空跑，还给数据库和服务器加压）。轮询是「能用但笨」的兜底方案。</p>
+
+<h3 style="margin-bottom:.3rem">② SSE：服务端单向推送的「细水长流」</h3>
+<p><b>Server-Sent Events（服务端发送事件，SSE）</b>让浏览器开一条<b>长连接</b>，服务端可以在这条连接上<b>持续单向</b>地往客户端推消息，直到一方关闭<sup><a href="#c3">3</a></sup>。它本质上还是一个普通的 HTTP 响应，只是这个响应「永远不结束」，服务端不停 <code>write</code> 新数据进去。浏览器端用内置的 <code>EventSource</code> 对象接收，<b>不需要装任何库</b>，而且断线会<b>自动重连</b><sup><a href="#c3">3</a></sup>。</p>
+
+<h3 style="margin-bottom:.3rem">③ WebSocket：一条全双工长连接</h3>
+<p><b>WebSocket</b> 是浏览器和服务器之间一条<b>双向（full-duplex，全双工）</b>的持久连接：建立之后，两端<b>都能随时主动</b>发消息，无需再走「请求-响应」<sup><a href="#c1">1</a></sup>。它先用一个普通 HTTP 请求带 <code>Upgrade: websocket</code> 头完成「协议升级握手」，之后这条 TCP 连接就脱离 HTTP，改说 WebSocket 协议（ws:// 或 wss://）。</p>
+
+<table class="matrix">
+<thead><tr><th>维度</th><th>轮询 Polling</th><th>SSE</th><th>WebSocket</th></tr></thead>
+<tbody>
+<tr><td>方向</td><td>客户端反复问</td><td class="good">服务端→客户端（单向）</td><td class="good">双向（全双工）</td></tr>
+<tr><td>底层</td><td>很多次独立 HTTP</td><td>一条长 HTTP 响应</td><td>升级后的独立 ws 协议</td></tr>
+<tr><td>浏览器 API</td><td>fetch + setInterval</td><td class="good">EventSource（内置）</td><td class="meh">WebSocket（内置）</td></tr>
+<tr><td>自动重连</td><td>不涉及</td><td class="good">浏览器内置</td><td class="bad">要自己写</td></tr>
+<tr><td>能否客户端主动发</td><td>本来就在问</td><td class="bad">不能（只能另开 HTTP）</td><td class="good">能</td></tr>
+<tr><td>实现复杂度</td><td class="good">最低</td><td class="good">低</td><td class="meh">中高</td></tr>
+<tr><td>适合 LinkPulse 看板</td><td>能用但浪费</td><td class="good">✅ 单向推送够用</td><td class="good">✅ 但稍重</td></tr>
+</tbody>
+</table>
+
+<div class="rw">🌍 <b>实战：</b>选型口诀——<b>只有服务端往客户端推（通知、日志流、实时计数、进度条）→ 用 SSE，它更简单、自带重连、走标准 HTTP（穿透代理/防火墙更省心）；需要双向高频交互（聊天、协同编辑、游戏、客户端频繁上行）→ 才上 WebSocket。</b>LinkPulse 的点击看板是典型的「服务端单向推」，SSE 本就够用；但本章主线用 WebSocket 实现，因为它是后端必会的硬技能，同时给你 SSE 的等价写法做对比。</div>
+
+<h2><span class="n">3</span>用 ws 给 LinkPulse 建 WebSocket 服务端</h2>
+
+<p><code>ws</code> 是 Node.js 上事实标准的 WebSocket 库，「简单、极快、测试充分」，既能当服务端也能当客户端<sup><a href="#c2">2</a></sup>。注意：<code>ws</code> 只在 Node 端用；<b>浏览器端直接用内置的 <code>WebSocket</code> 对象</b>，不需要也不能装 <code>ws</code><sup><a href="#c2">2</a></sup>。</p>
+
+<pre><code>npm i ws
+npm i -D @types/ws</code></pre>
+
+<p>LinkPulse 已经有一个 Express 的 <code>http.Server</code> 在跑。我们<b>不</b>另起一个端口，而是用 <code>noServer: true</code> 把 WebSocket 挂到同一个 HTTP 服务器上，靠 HTTP 的 <code>upgrade</code> 事件来接管握手<sup><a href="#c2">2</a></sup>。这样一个端口同时服务普通 API 和 ws，部署最省事。</p>
+
+<pre><code>// src/realtime/ws-hub.ts
+import { WebSocketServer, WebSocket } from 'ws';
+import type { Server } from 'node:http';
+import { logger } from '../logger.js';
+
+// 看板要推的事件结构（与前端约定好）
+export interface ClickEvent {
+  type: 'click';
+  shortCode: string;
+  clickCount: number;   // worker 算出的最新计数
+  at: string;           // ISO 时间戳
+}
+
+// noServer：不自己监听端口，复用 Express 的 http server
+const wss = new WebSocketServer({ noServer: true });
+
+wss.on('connection', (socket: WebSocket) =&gt; {
+  logger.info({ clients: wss.clients.size }, 'dashboard client connected');
+
+  // 客户端断开时 ws 会自动从 wss.clients 移除，无需手动清理
+  socket.on('close', () =&gt; {
+    logger.info({ clients: wss.clients.size }, 'dashboard client disconnected');
+  });
+
+  socket.on('error', (err) =&gt; logger.error({ err }, 'ws socket error'));
+});
+
+// 把 wss 挂到已有的 http server 上：监听 HTTP 的 upgrade 握手
+export function attachWebSocket(server: Server): void {
+  server.on('upgrade', (request, socket, head) =&gt; {
+    // 只接管 /ws/dashboard 这个路径的升级请求，其余拒绝
+    if (request.url !== '/ws/dashboard') {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, (ws) =&gt; {
+      wss.emit('connection', ws, request);
+    });
+  });
+}
+
+// 广播：把一个事件发给所有还连着的看板客户端
+export function broadcastClick(event: ClickEvent): void {
+  const payload = JSON.stringify(event);
+  for (const client of wss.clients) {
+    // 只发给状态为 OPEN 的连接，避免给正在关闭的 socket 写数据报错
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(payload);
+    }
+  }
+}</code></pre>
+
+<div class="note"><b>为什么用 <code>noServer</code> 而不是 <code>{ port: 8080 }</code>？</b> 传 <code>port</code> 会让 <code>ws</code> 自己起一个独立 HTTP 服务器占一个新端口；<code>noServer: true</code> 则让你<b>手动</b>在已有服务器的 <code>upgrade</code> 事件里调 <code>handleUpgrade</code><sup><a href="#c2">2</a></sup>。生产环境通常一个进程一个对外端口（反向代理后面），复用端口最省心。</div>
+
+<p>把它接进启动入口（你现有的 <code>server.listen</code> 那段）：</p>
+<pre><code>// src/server.ts
+import { createServer } from 'node:http';
+import { app } from './app.js';
+import { attachWebSocket } from './realtime/ws-hub.js';
+
+const server = createServer(app);   // 用 app 创建 http server
+attachWebSocket(server);            // 把 WebSocket 挂上去
+server.listen(3000, () =&gt; logger.info('LinkPulse up on :3000'));</code></pre>
+
+<p><code>wss.clients</code> 是一个 <code>Set</code>，装着当前所有活跃连接；广播就是遍历它、对每个 <code>readyState === WebSocket.OPEN</code> 的连接调 <code>send</code><sup><a href="#c2">2</a></sup>。检查 <code>OPEN</code> 很重要：连接可能正处于「正在关闭」状态，往里写会抛错。</p>
+
+<h2><span class="n">4</span>让 worker 处理完点击就广播</h2>
+
+<p>上一课我们把「点击落库 + 计数」放进了后台队列的 worker。现在的目标：worker 算出某个短码的最新 <code>clickCount</code> 后，调一下 <code>broadcastClick</code>，把事件推给所有看板。</p>
+
+<pre><code>// src/jobs/click.worker.ts（在你已有的处理逻辑末尾追加）
+import { prisma } from '../db.js';
+import { broadcastClick } from '../realtime/ws-hub.js';
+
+async function processClickJob(data: { shortCode: string; linkId: number; /* ... */ }) {
+  // 1. 落库一条 click 明细（已学）+ 原子自增计数
+  const link = await prisma.link.update({
+    where: { id: data.linkId },
+    data: { click_count: { increment: 1 } },
+    select: { short_code: true, click_count: true },
+  });
+
+  // 2. 实时广播给所有看板客户端
+  broadcastClick({
+    type: 'click',
+    shortCode: link.short_code,
+    clickCount: link.click_count,
+    at: new Date().toISOString(),
+  });
+}</code></pre>
+
+<div class="note"><b>关键前提（多实例时会咬人）：</b>上面 <code>broadcastClick</code> 只能广播到<b>当前进程</b>里 <code>wss.clients</code> 持有的连接。如果 worker 和 Web 服务器是<b>同一个进程</b>，没问题；但生产上 worker 往往是<b>独立进程</b>，它根本没有那些浏览器连接。第 6 节用 Redis pub/sub 解决这个跨进程/跨实例的问题。</div>
+
+<h2><span class="n">5</span>前端看板页面：浏览器内置 WebSocket 接收</h2>
+
+<p>浏览器端用内置的 <code>WebSocket</code> 对象连上来。建实例就开始连，连上触发 <code>open</code>，之后能收 <code>message</code>、能 <code>send</code><sup><a href="#c1">1</a></sup>。下面是一个最简单、自包含的看板页（放在 <code>public/dashboard.html</code> 由 Express 静态托管即可）：</p>
+
+<pre><code>&lt;!doctype html&gt;
+&lt;meta charset="utf-8"&gt;
+&lt;h1&gt;LinkPulse 实时点击看板&lt;/h1&gt;
+&lt;ul id="feed"&gt;&lt;/ul&gt;
+&lt;script&gt;
+  // wss:// 用于 https 站点；本地开发用 ws://
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/dashboard`);
+
+  ws.addEventListener('open', () =&gt; console.log('看板已连接'));
+
+  ws.addEventListener('message', (e) =&gt; {
+    const ev = JSON.parse(e.data);            // {type,shortCode,clickCount,at}
+    const li = document.createElement('li');
+    li.textContent = `${ev.shortCode} → ${ev.clickCount} 次（${ev.at}）`;
+    document.getElementById('feed').prepend(li);
+  });
+
+  // WebSocket 不自带重连，断了要自己重连（这里简单延时重连）
+  ws.addEventListener('close', () =&gt; {
+    console.warn('连接断开，3 秒后重连');
+    setTimeout(() =&gt; location.reload(), 3000);
+  });
+&lt;/script&gt;</code></pre>
+
+<p>注意最后那段：<b>WebSocket 协议本身不负责自动重连</b>，网络抖动、服务重启都会让连接断掉，必须自己监听 <code>close</code> 重连（生产里要做指数退避，不是简单 reload）。这正是 SSE 相对省心的地方——它<b>内置自动重连</b><sup><a href="#c3">3</a></sup>。下面给出 SSE 的等价实现作对比。</p>
+
+<h3 style="margin-bottom:.3rem">SSE 等价版：更少代码搞定单向推送</h3>
+<p>SSE 服务端就是一个永不结束的 HTTP 响应：把 <code>Content-Type</code> 设成 <code>text/event-stream</code>，然后不停 <code>res.write()</code><sup><a href="#c3">3</a></sup>。报文格式是纯文本，每条消息用<b>两个换行</b>分隔；常见字段有 <code>data:</code>（负载）、<code>event:</code>（事件名，省略则触发 <code>message</code>）、<code>id:</code>、<code>retry:</code>（重连间隔毫秒），以 <code>:</code> 开头的行是注释（常用于心跳保活）<sup><a href="#c3">3</a></sup>。</p>
+
+<div class="cmp">
+<div><h4>SSE 服务端（Express 路由）</h4>
+<pre><code>// src/realtime/sse.ts
+import type { Request, Response } from 'express';
+
+const clients = new Set&lt;Response&gt;();
+
+export function sseHandler(req: Request, res: Response) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write('retry: 3000\n\n');   // 告诉浏览器断后 3s 重连
+  clients.add(res);
+  req.on('close', () =&gt; clients.delete(res));
+}
+
+export function ssePush(event: object) {
+  const line = `event: click\ndata: ${JSON.stringify(event)}\n\n`;
+  for (const res of clients) res.write(line);
+}</code></pre></div>
+<div><h4>SSE 客户端（浏览器内置）</h4>
+<pre><code>// 不用装任何库，断线浏览器自动重连
+const es = new EventSource('/sse/dashboard');
+
+es.addEventListener('click', (e) =&gt; {
+  const ev = JSON.parse(e.data);
+  console.log(ev.shortCode, ev.clickCount);
+});
+
+es.onerror = (err) =&gt;
+  console.error('SSE 出错（会自动重连）', err);
+
+// 需要时手动关闭，停止重连
+// es.close();</code></pre></div>
+</div>
+
+<div class="rw">🌍 <b>实战：</b>SSE 真实会踩的坑——① 必须设 <code>Content-Type: text/event-stream</code>，否则浏览器不当它是事件流；② 经过 <b>Nginx 反向代理</b>时要关掉响应缓冲（<code>proxy_buffering off;</code>），否则消息会被攒着不实时下发；③ 长连接要定期发心跳注释行（如每 15s 一行 <code>: ping\n\n</code>）防止中间代理把「看似空闲」的连接掐掉；④ <b>HTTP/1.1 下每个域名同时只有 6 个连接</b>的浏览器限制对 SSE 影响明显，HTTP/2 下基本无忧。</div>
+
+<h2><span class="n">6</span>两个绕不开的工程问题：鉴权 + 多实例</h2>
+
+<h3 style="margin-bottom:.3rem">① WebSocket 也要鉴权</h3>
+<p>很多人以为「升级成 ws 就管不了权限了」。错。看板数据是用户私有的（谁的链接被点了），不能裸奔。<b>握手阶段</b>就是鉴权时机——握手是一个普通 HTTP 请求，能带 Cookie、Header、查询参数。在 <code>upgrade</code> 事件里校验，失败就 <code>destroy()</code> 拒绝，根本不让它升级成功：</p>
+
+<pre><code>// 在 attachWebSocket 里加鉴权（复用你已有的 JWT 校验，Lesson 0017 起学过）
+import { verifyToken } from '../auth/jwt.js';
+
+server.on('upgrade', (request, socket, head) =&gt; {
+  if (request.url?.split('?')[0] !== '/ws/dashboard') { socket.destroy(); return; }
+
+  try {
+    // token 从查询参数取：浏览器原生 WebSocket 不能自定义请求头
+    const url = new URL(request.url, `http://${request.headers.host}`);
+    const token = url.searchParams.get('token');
+    const user = verifyToken(token ?? '');   // 失败抛错
+    wss.handleUpgrade(request, socket, head, (ws) =&gt; {
+      (ws as any).userId = user.id;           // 把身份挂到连接上，后续按用户过滤
+      wss.emit('connection', ws, request);
+    });
+  } catch {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();                          // 拒绝握手
+  }
+});</code></pre>
+
+<div class="rw">🌍 <b>实战：</b>浏览器原生 <code>WebSocket</code> 构造函数<b>不支持自定义请求头</b>，所以传 JWT 常见两种做法：放在 <b>URL 查询参数</b>（如上，简单但 token 可能进日志，建议用短时效 token），或先连上再发一条「认证消息」。SSE 因为是普通 HTTP，可直接带 Cookie，鉴权更顺。无论哪种，<b>鉴权要在能收到任何数据之前完成</b>。</div>
+
+<h3 style="margin-bottom:.3rem">② 多实例部署：用 Redis pub/sub 跨实例广播</h3>
+<p>问题来了：线上为了扛量，LinkPulse 会跑<b>多个实例</b>（多进程/多容器），用户 A 的看板连在<b>实例 1</b>，处理点击的 worker 却在<b>实例 2</b>。实例 2 调 <code>broadcastClick</code> 只能推到自己 <code>wss.clients</code> 里的连接——A 在实例 1，<b>收不到</b>。</p>
+
+<p>解法是你<b>早就学过的 Redis 的 pub/sub（发布订阅）</b>：每个实例既向一个 Redis 频道<b>发布</b>点击事件，又<b>订阅</b>这个频道；任何实例收到消息后，都向自己本地的 WebSocket 连接广播。这样事件就能跨实例扩散到所有看板<sup><a href="#c4">4</a></sup>。</p>
+
+<div class="flowbox">
+<span class="node">worker（实例2）算出计数</span><span class="arrow">→ publish →</span>
+<span class="node">Redis 频道 clicks</span><span class="arrow">→ 所有实例都 subscribe →</span>
+<span class="node">实例1 / 实例2 各自广播给本地 ws 客户端</span>
+</div>
+
+<pre><code>// src/realtime/redis-fanout.ts
+import Redis from 'ioredis';
+import { broadcastClick, type ClickEvent } from './ws-hub.js';
+
+const CHANNEL = 'linkpulse:clicks';
+// ioredis 要求：订阅连接和发布连接必须分开（订阅模式下不能再发普通命令）
+const sub = new Redis(process.env.REDIS_URL!);
+const pub = new Redis(process.env.REDIS_URL!);
+
+// worker 那边：不再直接调 broadcastClick，而是 publish 到 Redis
+export function publishClick(event: ClickEvent): void {
+  pub.publish(CHANNEL, JSON.stringify(event));
+}
+
+// 每个 Web 实例启动时调一次：订阅频道，收到就广播给本地连接
+export function startRedisFanout(): void {
+  sub.subscribe(CHANNEL);
+  sub.on('message', (_channel, message) =&gt; {
+    broadcastClick(JSON.parse(message) as ClickEvent);
+  });
+}</code></pre>
+
+<div class="rw">🌍 <b>实战：</b>如果你选 <b>socket.io</b> 而不是裸 <code>ws</code>，这套跨实例广播官方已经帮你封装好了——装 <code>@socket.io/redis-adapter</code>，<code>io.to('room').emit()</code> 会自动经由 Redis pub/sub 扩散到集群里所有节点<sup><a href="#c4">4</a></sup>。socket.io 还自带<b>断线自动重连、心跳、对老浏览器的传输降级（fallback 到 HTTP 长轮询）、以及「房间（rooms）」</b>——比如把每个用户的所有看板连接放进 <code>room: user:42</code>，推送时只发给这个房间，天然实现「按用户过滤」。代价是它有自己的协议、包更大，且非标准 WebSocket。<b>权衡：要房间/降级/集群开箱即用 → socket.io；要轻量贴近标准 → ws 自己补这几块。</b></div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">选型</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">LinkPulse 的实时点击看板只需要「服务端把最新计数单向推给浏览器」，浏览器不需要主动上行高频消息。从「实现最省心 + 自带断线重连」角度，哪个方案最契合？</p>
+  <button class="opt" data-correct="false" data-ex="短轮询延迟高且大量请求空跑，浪费数据库和服务器资源，是兜底而非首选。">短轮询：前端 setInterval 每 3 秒拉一次接口</button>
+  <button class="opt" data-correct="true" data-ex="正确。SSE 是服务端→客户端单向长连接，浏览器用内置 EventSource 接收、且断线自动重连，正好匹配「单向推送」需求，实现最省心。">SSE：服务端 text/event-stream 持续 write，浏览器用 EventSource 接收</button>
+  <button class="opt" data-correct="false" data-ex="WebSocket 能做，但它是全双工、需自己处理重连/心跳，对纯单向推送属于杀鸡用牛刀，没必要的复杂度。">WebSocket：建全双工长连接并自己实现重连逻辑</button>
+  <button class="opt" data-correct="false" data-ex="把数据塞进 JWT 不是推送机制，且 token 会过期、体积有限，与实时推送无关。">把实时计数编码进 JWT，让前端解码读取</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task"><h3>⌨️ 动手：给 LinkPulse 接一条实时通道</h3>
+<ol>
+<li><code>npm i ws && npm i -D @types/ws</code>，新建 <code>src/realtime/ws-hub.ts</code>，实现 <code>attachWebSocket(server)</code> 与 <code>broadcastClick(event)</code>（用 <code>noServer: true</code> + <code>upgrade</code> 事件，只接管 <code>/ws/dashboard</code>）。</li>
+<li>在 <code>src/server.ts</code> 用 <code>http.createServer(app)</code> 创建 server 并调 <code>attachWebSocket(server)</code>，确保普通 API 与 ws 共用一个端口。</li>
+<li>在点击处理逻辑（worker 或临时在跳转路由里）算出最新 <code>click_count</code> 后调 <code>broadcastClick(...)</code>。先在单进程里跑通。</li>
+<li>新建 <code>public/dashboard.html</code>，用浏览器内置 <code>WebSocket</code> 连 <code>/ws/dashboard</code>，把收到的事件 <code>prepend</code> 到列表里。开两个浏览器标签页，狂点你的某个短链，看两个看板是否同时跳动。</li>
+<li><b>进阶（任选其一）：</b>(a) 把第 5 节的 SSE 版也实现一遍，对比代码量与「拔网线再插」时的重连表现；(b) 在 <code>upgrade</code> 里加 JWT 鉴权（token 走查询参数），无 token 时返回 401 并 <code>destroy()</code>；(c) 用 <code>ioredis</code> 把 <code>broadcastClick</code> 改成「publish 到 Redis 频道 + 各实例 subscribe 后本地广播」，开两个进程验证跨实例。</li>
+</ol></div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API" target="_blank" rel="noopener">MDN · WebSocket API</a> 与 <a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events" target="_blank" rel="noopener">MDN · Using server-sent events</a>。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b>两个看板标签页同时跳动的截图（或 GIF），以及你最终选了 SSE 还是 WebSocket、为什么。<br><strong>下一课预告：</strong>实时通道能扛多少并发连接？我们将做<b>性能与压力测试</b>，用 autocannon / k6 给 LinkPulse 的跳转和实时通道压测，找出瓶颈、读懂 p95/p99 延迟。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API" target="_blank" rel="noopener">MDN · WebSocket API（WebSockets）</a>（WebSocket 是浏览器与服务器间的双向交互会话，无需轮询即可收发；客户端用内置 WebSocket 对象）。</li>
+    <li id="c2"><a href="https://github.com/websockets/ws" target="_blank" rel="noopener">websockets/ws · GitHub</a>（Node.js WebSocket 库：WebSocketServer 的 noServer 用法、upgrade/handleUpgrade、wss.clients 广播、readyState===WebSocket.OPEN；不在浏览器运行）。</li>
+    <li id="c3"><a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events" target="_blank" rel="noopener">MDN · Using server-sent events</a>（SSE 单向、text/event-stream 格式与 data/event/id/retry 字段、EventSource 接收、默认自动重连）。</li>
+    <li id="c4"><a href="https://socket.io/docs/v4/redis-adapter/" target="_blank" rel="noopener">Socket.IO · Redis adapter</a>（Redis adapter 基于 Redis Pub/Sub，把发往多客户端的包发布到 Redis 频道，集群内其他 Socket.IO 节点订阅后转发，实现跨实例广播）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0021 · 上一课 <a href="0020-background-jobs-queues.html">后台任务与队列</a> · 下一课（预告）：<em>性能与压力测试</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

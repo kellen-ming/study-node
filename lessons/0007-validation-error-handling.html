@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0007 · 输入校验与错误处理（别信用户输入）</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  /* 本章专属可视化 */
+  .flow{display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; justify-content:center; margin:1.3rem 0; font-size:.78rem}
+  .flow .box{background:#fbf7ee; border:1px solid var(--accent); border-radius:6px; padding:.45rem .65rem; font-family:"SF Mono",Menlo,Consolas,monospace; text-align:center}
+  .flow .gate{background:#1a1a17; color:#f0eecf; border-color:#1a1a17}
+  .flow .bad{background:var(--no-bg); border-color:var(--no); color:var(--no)}
+  .flow .good{background:var(--ok-bg); border-color:var(--ok); color:var(--ok)}
+  .flow .arr{color:var(--accent); font-weight:700; font-size:1.1em}
+  .flow .lbl{font-size:.68rem; color:var(--muted); width:100%; text-align:center; margin-top:-.1rem}
+  table.api{border-collapse:collapse; width:100%; font-size:.82rem; margin:1rem 0}
+  table.api th,table.api td{border:1px solid var(--rule); padding:.45rem .6rem; text-align:left; vertical-align:top}
+  table.api th{background:#f4f1e4; font-weight:600}
+  table.api code{font-size:.92em}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0007 / 阶段 2</span>
+</nav>
+
+<div class="kicker">Lesson 0007 · Node.js 后端之路</div>
+<h1>输入校验与错误处理<br>（永远，永远别信用户输入）</h1>
+
+<div class="mission">
+  <b>你的 API 现在是「裸奔」的。</b> 上一课你给 LinkPulse 写了 <code>POST /api/links</code>，直接读 <code>req.body.url</code> 就当成网址用——
+  <strong>没有任何校验</strong>。但请求体是<strong>客户端发来的</strong>，谁都能伪造：它可能是 <code>undefined</code>、是个数字、是 <code>"哈哈哈"</code>、甚至是一段攻击载荷。
+  这一课你会建立后端工程师的第一条铁律——<strong>「永不信任输入」</strong>——并用 <strong>zod</strong> 把进门的数据挡在关卡外，再用 Express 的<strong>错误处理中间件</strong>统一兜住所有意外。这是 LinkPulse 从「玩具」走向「能收费上线」的第一道安全闸门。
+</div>
+
+<h2><span class="n">1</span>为什么「永不信任输入」是铁律</h2>
+<p>
+  先看你上一课的真实代码长什么样（简化版）：
+</p>
+<pre><code>app.post('/api/links', (req, res) =&gt; {
+  const url = req.body.url           // ← 盲信！万一 body 里根本没有 url？
+  const code = Math.random().toString(36).slice(2, 8)
+  res.status(201).json({ code, url })
+})</code></pre>
+<p>
+  作为前端你很熟「请求体（request body）」这个概念。但在前端，你通常能<strong>控制自己发什么</strong>；在后端，<strong>请求来自整个互联网</strong>，发送者可能是：手滑的真实用户、写错的另一个团队、自动化爬虫、或者<strong>主动找漏洞的攻击者</strong>。所以后端的世界观必须反过来：
+</p>
+<div class="rw">
+  🌍 <b>OWASP 的官方立场：</b>安全权威 OWASP 在《Input Validation Cheat Sheet》里明确写道——客户端（浏览器里的 JavaScript）校验<strong>只是为了体验</strong>，<em>“can be circumvented by an attacker who disables JavaScript or uses a web proxy”</em>（攻击者关掉 JS 或用代理工具就能绕过）<sup><a href="#c4">4</a></sup>。因此<strong>校验必须在服务端、在数据被使用之前完成</strong>。前端校验拦不住坏人，只有后端校验能。
+</div>
+<p>不校验会出什么事？给上面这段代码喂几个真实请求看看：</p>
+<table class="api">
+  <tr><th>客户端发来的 body</th><th>不校验的后果</th></tr>
+  <tr><td><code>{}</code>（漏传 url）</td><td><code>url</code> 是 <code>undefined</code>，被当合法短链存进库，前端跳转时 404</td></tr>
+  <tr><td><code>{ "url": 12345 }</code></td><td>数字混进字符串字段，后续 <code>.startsWith()</code> 之类操作直接抛错崩溃</td></tr>
+  <tr><td><code>{ "url": "随便一段文字" }</code></td><td>不是合法网址，存下来后用户点击短链跳到一个无效地址</td></tr>
+  <tr><td><code>{ "url": "javascript:alert(1)" }</code></td><td>潜在的 XSS 跳转载荷，可能伤害点击短链的访客</td></tr>
+</table>
+<p>
+  归纳成两个「为什么」：<strong>① 健壮性（Robustness）</strong>——脏数据进了系统，轻则脏数据落库、重则进程崩溃；<strong>② 安全（Security）</strong>——未经校验的输入是注入攻击（SQL 注入、XSS、SSRF）的头号入口。OWASP 把它列为应当贯穿整个应用的<strong>主动控制项</strong>之一<sup><a href="#c4">4</a></sup>。
+</p>
+<p class="note">
+  💡 <strong>术语：校验（validation）≠ 净化（sanitization）。</strong> 校验是<strong>判断数据合不合格、不合格就拒绝</strong>（本章重点）；净化是<strong>把数据洗干净再用</strong>（如转义 HTML）。OWASP 提醒：即使一个值「校验通过」，也未必绝对安全（一个合法 URL 里仍可能藏 XSS），所以校验之外还要配合转义/参数化查询等纵深防御<sup><a href="#c4">4</a></sup>。本章先把第一道闸门——校验——建起来。
+</p>
+
+<h2><span class="n">2</span>zod 是什么，为什么用它</h2>
+<p>
+  你当然可以手写一堆 <code>if</code>：<code>if (!req.body.url) ...</code>、<code>if (typeof url !== 'string') ...</code>、<code>if (!/^https?:/.test(url)) ...</code>。但字段一多，这种校验代码会迅速膨胀成难维护的「if 地狱」，而且很容易漏判。
+</p>
+<p>
+  <strong>zod</strong> 是一个 <em>schema validation</em>（模式校验）库。它的核心思想是：<strong>先用一个「schema（模式）」声明式地描述「合格的数据长什么样」，再拿这个 schema 去校验真实数据</strong><sup><a href="#c1">1</a></sup>。
+</p>
+<div class="note">
+  💡 <strong>类比：</strong>schema 就像机场安检的「登机标准」清单——「必须有登机牌、证件、行李不超规」。你不需要对每个旅客手写检查逻辑，只要把人往这张「标准」上一套，符合就放行、不符合就拦下并告诉他哪里不对。zod 的 schema 就是这张可复用的标准清单。
+</div>
+<p>先装上它（项目目前还是 JS，但 zod 在纯 JS 里照样工作）：</p>
+<pre><code>npm i zod</code></pre>
+<p>最小的例子——描述「一个有 username 字段、且必须是字符串的对象」<sup><a href="#c1">1</a></sup>：</p>
+<pre><code>import { z } from 'zod'
+
+const User = z.object({
+  username: z.string(),
+})</code></pre>
+<p>这里出现了三个 zod 的基础构件，先讲清楚再用：</p>
+<table class="api">
+  <tr><th>写法</th><th>含义</th></tr>
+  <tr><td><code>z.object({...})</code></td><td>描述一个<strong>对象</strong>，花括号里列出每个字段及其规则。我们的请求体就是对象，所以最外层几乎总是它。</td></tr>
+  <tr><td><code>z.string()</code></td><td>这个字段<strong>必须是字符串</strong>。是数字、布尔、缺失都不合格。</td></tr>
+  <tr><td><code>z.url()</code></td><td>这个字段必须是<strong>合法 URL 格式</strong>的字符串。正是 LinkPulse 的 <code>url</code> 字段要的<sup><a href="#c2">2</a></sup>。</td></tr>
+</table>
+<div class="rw">
+  🌍 <b>版本提示（真实会踩的坑）：</b>你可能在老教程里看到 <code>z.string().url()</code> 这种链式写法。从 <strong>zod v4</strong> 起，URL、email 等「字符串格式」校验被提升为<strong>顶层函数</strong> <code>z.url()</code>、<code>z.email()</code>，老的链式 <code>.url()</code> 已被标记 <em>deprecated（弃用）</em>，未来大版本会移除<sup><a href="#c2">2</a></sup>。本课统一用新写法 <code>z.url()</code>，照着官方走，别被旧博客带偏。</p>
+</div>
+<p>
+  还可以给规则加约束和<strong>自定义错误信息</strong>——这一点对「给前端清晰提示」很关键<sup><a href="#c2">2</a></sup>：
+</p>
+<pre><code>const LinkSchema = z.object({
+  url: z.url({ message: 'url 必须是合法的网址' }),
+})</code></pre>
+
+<h2><span class="n">3</span><code>parse</code> vs <code>safeParse</code>：两种校验姿势</h2>
+<p>
+  有了 schema，怎么拿它去校验数据？zod 给了两个方法，区别只在「失败时怎么办」<sup><a href="#c1">1</a></sup>：
+</p>
+<div class="cmp">
+  <div>
+    <h4>parse —— 失败就 throw</h4>
+<pre><code>// 成功：返回校验后的数据
+LinkSchema.parse({ url: 'https://a.com' })
+// =&gt; { url: 'https://a.com' }
+
+// 失败：抛出 ZodError 异常
+LinkSchema.parse({ url: 123 })
+// =&gt; throw ZodError</code></pre>
+  </div>
+  <div>
+    <h4>safeParse —— 失败不抛，返回结果对象</h4>
+<pre><code>const r = LinkSchema.safeParse(req.body)
+if (!r.success) {
+  r.error    // ← ZodError 实例
+} else {
+  r.data     // ← 校验通过的数据
+}</code></pre>
+  </div>
+</div>
+<p>
+  <code>safeParse</code> 返回的是一个<strong>带 <code>success</code> 布尔字段的结果对象</strong>（官方称之为 discriminated union，可辨识联合）：成功时 <code>{ success: true, data }</code>，失败时 <code>{ success: false, error }</code><sup><a href="#c1">1</a></sup>。它<strong>不会抛异常</strong>，所以你能用普通的 <code>if</code> 流程优雅地处理失败。
+</p>
+<div class="note">
+  💡 <strong>该用哪个？</strong>处理「来自外部、本就可能不合格」的数据（比如用户请求体）→ 用 <code>safeParse</code>，因为失败是<strong>预期之内</strong>的正常分支，不该靠 try/catch。处理「你高度确信格式正确」的内部数据 → 用 <code>parse</code> 更简洁。<strong>校验请求体，首选 <code>safeParse</code>。</strong>
+</div>
+
+<h2><span class="n">4</span>给 LinkPulse 的 <code>POST /api/links</code> 加校验</h2>
+<p>
+  把上面的零件组装起来。当 <code>safeParse</code> 失败时，我们要返回 <strong>HTTP <code>400 Bad Request</code></strong>——这个状态码你在前端见过，语义就是「<strong>客户端发来的请求有问题</strong>」，正好对应「输入不合格」。
+</p>
+<p>
+  失败时把错误信息整理成对前端友好的结构。zod 提供 <code>z.flattenError(error)</code>，它把一堆错误<strong>压平成按字段分组</strong>的形状，特别适合表单类请求<sup><a href="#c3">3</a></sup>：
+</p>
+<pre><code>z.flattenError(result.error)
+// =&gt; {
+//   formErrors: [],
+//   fieldErrors: { url: ['url 必须是合法的网址'] }
+// }</code></pre>
+<p>改造后的路由（注意这是<strong>同步校验</strong>，没有任何 await）：</p>
+<pre><code>import { z } from 'zod'
+
+const LinkSchema = z.object({
+  url: z.url({ message: 'url 必须是合法的网址' }),
+})
+
+app.post('/api/links', (req, res) =&gt; {
+  const result = LinkSchema.safeParse(req.body)
+
+  if (!result.success) {
+    // 校验失败 → 400 + 统一错误结构，让前端能逐字段显示
+    return res.status(400).json({
+      error: 'ValidationError',
+      details: z.flattenError(result.error).fieldErrors,
+    })
+  }
+
+  // 走到这里，result.data 一定是「干净」的数据
+  const { url } = result.data
+  const code = Math.random().toString(36).slice(2, 8)
+  res.status(201).json({ code, url })
+})</code></pre>
+<div class="flow">
+  <span class="box gate">POST /api/links</span><span class="arr">→</span>
+  <span class="box">safeParse(req.body)</span>
+  <span class="lbl">校验关卡</span>
+  <span class="box bad">✗ 不合格 → 400 + error</span>
+  <span class="box good">✓ 合格 → 201 + 短码</span>
+</div>
+<p>验证一下（确保你的服务器在跑，且上一课已 <code>app.use(express.json())</code>）：</p>
+<pre><code># 缺 url → 应得 400
+curl -i -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" -d '{}'
+
+# 不是合法网址 → 应得 400
+curl -i -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" -d '{"url":"哈哈"}'
+
+# 合法 → 应得 201
+curl -i -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" -d '{"url":"https://example.com/very/long/path"}'</code></pre>
+<div class="rw">
+  🌍 <b>统一错误响应格式（真实项目的约定）：</b>注意我们失败时<strong>固定返回 <code>{ error, details }</code> 结构</strong>。在真实团队里，「所有错误都长一个样」是一条重要约定——前端只需写<strong>一套</strong>错误处理逻辑（看到 <code>error</code> 字段就弹提示、看到 <code>details</code> 就标红对应输入框），不用为每个接口猜返回结构。约定一种错误信封（error envelope），是后端 API 设计的基本功。
+</div>
+<div class="rw">
+  🌍 <b>zod 的「一鱼两吃」（埋个伏笔）：</b>zod 最被推崇的一点是——<strong>同一份 schema 既能在运行时校验数据（本章用的），又能自动推导出 TypeScript 静态类型</strong>（用 <code>z.infer&lt;typeof LinkSchema&gt;</code>）<sup><a href="#c1">1</a></sup>。也就是说写一次 schema，编译期和运行期<strong>两种安全一起拿到</strong>，再也不会出现「类型说是 string、运行时却来个 number」的撕裂。等 <strong>Lesson 0010 项目迁到 TypeScript</strong> 后，我们会回来兑现这个红利。这正是 zod 比手写 <code>if</code> 高一个维度的原因。
+</div>
+
+<h2><span class="n">5</span>错误处理中间件：兜住所有意外</h2>
+<p>
+  校验挡住了「能预料的坏输入」。但程序里还有<strong>预料之外</strong>的错误：第三方服务超时、数据库断连、某个 <code>undefined.foo</code> 把代码炸了……总不能在每个路由里都写一大坨 try/catch。Express 为此提供了一种特殊中间件——<strong>错误处理中间件（error-handling middleware）</strong>。
+</p>
+<p>
+  上一课你知道普通中间件是 <strong>3 个参数</strong> <code>(req, res, next)</code>。错误处理中间件的唯一区别是：<strong>它有 4 个参数 <code>(err, req, res, next)</code></strong>。Express <strong>就是靠「参数个数是 4」来识别它是错误处理器</strong>的——哪怕你用不到 <code>next</code>，也必须把 4 个参数都写全，否则 Express 会把它当成普通中间件<sup><a href="#c5">5</a></sup>。
+</p>
+<pre><code>// 放在所有路由 / app.use 的【最后面】
+app.use((err, req, res, next) =&gt; {
+  console.error(err)              // 记录到服务端日志，便于排查
+  res.status(err.status || 500).json({
+    error: err.name || 'InternalServerError',
+    message: err.message,
+  })
+})</code></pre>
+<p>关于错误处理中间件，官方强调三条规则<sup><a href="#c5">5</a></sup>，每条都要理解：</p>
+<ul>
+  <li><strong>① 必须 4 个参数</strong> <code>(err, req, res, next)</code> —— 这是它和普通中间件的唯一区分标志。</li>
+  <li><strong>② 必须放在最后</strong> —— 在所有其它 <code>app.use()</code> 和路由<strong>之后</strong>定义，这样它才能接住前面任何环节抛出的错误。（回忆 0006：404 兜底放最后，错误处理器放得比 404 还后。）</li>
+  <li><strong>③ 用 <code>next(err)</code> 触发它</strong> —— 在普通中间件/路由里，只要给 <code>next()</code> 传一个参数，Express 就认为<strong>那是个错误</strong>，于是<strong>跳过所有剩余的普通中间件</strong>，直接进到错误处理中间件<sup><a href="#c5">5</a></sup>。</li>
+</ul>
+
+<h3 style="font-size:1.05rem;margin:1.6rem 0 .4rem">同步错误 vs 异步错误：谁帮你兜，谁要你自己交</h3>
+<p>这是新手最容易栽跟头的地方，务必分清。</p>
+<p>
+  <strong>同步错误（synchronous）——Express 自动接住。</strong> 在路由里<strong>直接 <code>throw</code></strong> 的错误（包括 zod 的 <code>parse</code> 抛的 <code>ZodError</code>），Express 会自动捕获并送进你的错误处理中间件，<strong>你什么都不用做</strong><sup><a href="#c5">5</a></sup>：
+</p>
+<pre><code>app.get('/boom', (req, res) =&gt; {
+  throw new Error('炸了')   // ✅ Express 自动接住，转给错误中间件
+})</code></pre>
+<p>
+  <strong>异步错误（asynchronous）——要看 Express 版本。</strong> 这里有个关键分水岭，而且<strong>正好和 LinkPulse 相关</strong>，因为我们项目装的是 <code>express@^5</code>（看 <code>package.json</code>）：
+</p>
+<div class="cmp">
+  <div>
+    <h4>Express 4 的世界（老教程）</h4>
+<pre><code>// ❌ 这个 reject 不会被自动接住
+app.get('/u/:id', async (req, res) =&gt; {
+  const u = await getUser(req.params.id)
+  res.json(u)
+})
+// 必须手动 try/catch + next(err)：
+app.get('/u/:id', async (req, res, next) =&gt; {
+  try {
+    res.json(await getUser(req.params.id))
+  } catch (err) {
+    next(err)   // 手动上交
+  }
+})</code></pre>
+  </div>
+  <div>
+    <h4>Express 5 的世界（我们用的）</h4>
+<pre><code>// ✅ 返回的 Promise 若 reject，
+// Express 5 会【自动】调用 next(err)
+app.get('/u/:id', async (req, res) =&gt; {
+  const u = await getUser(req.params.id)  // 抛错 → 自动转交
+  res.json(u)
+})
+// 不再需要到处包 try/catch</code></pre>
+  </div>
+</div>
+<p>
+  官方原话：在 Express 5 中，<em>“route handlers and middleware that return a Promise will call <code>next(value)</code> automatically when they reject or throw an error.”</em>（返回 Promise 的处理器在 reject 或抛错时会自动调用 <code>next</code>）<sup><a href="#c5">5</a></sup>。
+</p>
+<div class="rw">
+  🌍 <b>真实会踩的坑：</b>大量网上 Express 教程仍是 4.x 写法，到处教你装 <code>express-async-handler</code> 或手包 try/catch 来「补救」异步错误。我们的 LinkPulse 用的是 <strong>Express 5</strong>，这一痛点<strong>已被官方原生解决</strong><sup><a href="#c5">5</a></sup>，盲目照搬旧方案只会徒增噪音。但请记牢边界：自动接住的前提是「处理器<strong>返回了那个 Promise</strong>」。如果你在回调里(如老式 <code>fs.readFile(cb)</code>)出错、或自己 <code>setTimeout</code> 里抛错——它<strong>没</strong>被 <code>await</code>/返回，Express 仍接不住，那时还得老老实实 <code>next(err)</code>。</p>
+</div>
+<p>
+  最后补一个官方提到的细节：如果错误发生时<strong>响应头已经发出去了</strong>（<code>res.headersSent</code> 为真），你的错误处理器应当 <code>return next(err)</code> 把它交还给 Express 内置的默认错误处理器，由后者负责关闭连接——因为这时你已经没法再改状态码了<sup><a href="#c5">5</a></sup>。
+
+</p>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">校验 + 错误处理</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">客户端往 <code>POST /api/links</code> 发了 <code>{ "url": 12345 }</code>。你用 <code>LinkSchema.safeParse(req.body)</code> 校验。下面哪种做法最正确？</p>
+  <button class="opt" data-correct="true" data-ex="正解。safeParse 不抛异常，失败时返回 { success:false, error }，用 if 判断后返回 400（客户端输入有误）并附上清晰的字段错误，前端就能精准提示。这正是处理外部输入的标准姿势。">检查 <code>result.success</code>，为 false 时返回 <code>400</code> 加上整理过的错误信息</button>
+  <button class="opt" data-correct="false" data-ex="错。输入不合格是【客户端】的问题，应返回 4xx（这里是 400 Bad Request）。返回 500 等于在说『服务器自己出 bug 了』，会误导前端和监控。">检查 <code>result.success</code>，为 false 时返回 <code>500 Internal Server Error</code></button>
+  <button class="opt" data-correct="false" data-ex="错。safeParse 的设计初衷就是【不抛异常、用返回值表达成败】。它根本不会 throw，包 try/catch 既多余又抓不到东西。想用 try/catch 的话该配 parse。">把 <code>safeParse</code> 包在 <code>try/catch</code> 里，靠 <code>catch</code> 捕获校验失败</button>
+  <button class="opt" data-correct="false" data-ex="错，这正是『盲信用户输入』的反面教材，也是本章要消灭的写法——url 是数字时后续逻辑会崩，脏数据还会落库。">忽略 <code>result</code>，直接用 <code>req.body.url</code> 生成短码</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：给 LinkPulse 装上「安检关卡」</h3>
+  <ol>
+    <li>在项目根目录运行 <code>npm i zod</code>，确认 <code>package.json</code> 的 <code>dependencies</code> 里出现了 <code>zod</code>。</li>
+    <li>在 <code>express-server.js</code> 顶部 <code>import { z } from 'zod'</code>，并定义 <code>LinkSchema = z.object({ url: z.url({ message: 'url 必须是合法的网址' }) })</code>。</li>
+    <li>改写 <code>POST /api/links</code>：用 <code>LinkSchema.safeParse(req.body)</code>；失败返回 <code>400</code> + <code>{ error:'ValidationError', details: z.flattenError(result.error).fieldErrors }</code>；成功才用 <code>result.data.url</code> 生成短码。</li>
+    <li>在文件<strong>最后</strong>（404 兜底中间件<strong>之后</strong>）加一个 4 参数错误处理中间件 <code>app.use((err, req, res, next) =&gt; {...})</code>，统一返回 <code>{ error, message }</code> 并打印 <code>console.error(err)</code>。</li>
+    <li>临时加一个 <code>app.get('/boom', () =&gt; { throw new Error('测试错误') })</code>，用浏览器或 curl 访问它，确认请求<strong>没有挂起</strong>、而是被错误中间件接住返回了 JSON。验证完删掉这行。</li>
+    <li>用本课第 4 小节的三条 <code>curl</code> 分别验证 400 / 400 / 201，确认错误响应里能看到针对 <code>url</code> 字段的清晰提示。</li>
+  </ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://expressjs.com/en/guide/error-handling.html" target="_blank" rel="noopener">Express 官方《Error Handling》指南</a> 与 <a href="https://zod.dev/basics" target="_blank" rel="noopener">Zod 官方《Basic usage》</a>。两篇都很短，读完你对本章会更踏实。</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑通后发我：</b>① <code>POST /api/links</code> 发 <code>{}</code> 时的<strong>完整 400 响应体</strong>（含 <code>details</code>）；② 你那个 <code>/boom</code> 路由被错误中间件接住后返回的 JSON。让我确认你的校验关卡和错误兜底都生效了。
+  <br><strong>下一课预告：</strong>路由都堆在一个文件里很快会乱。Lesson 0008 我们用 <code>express.Router()</code> 做<strong>分层</strong>，把 LinkPulse 的路由、业务逻辑拆开，为接下来接数据库做好结构准备。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://zod.dev/basics" target="_blank" rel="noopener">Zod — Basic usage</a>（z.object / z.string、parse 与 safeParse 的返回结构 { success, data, error }、z.infer 类型推导）。</li>
+    <li id="c2"><a href="https://zod.dev/api" target="_blank" rel="noopener">Zod — Defining schemas（API）</a>（顶层 <code>z.url()</code>、自定义错误消息 <code>{ message }</code>；v4 起链式 <code>.url()</code> 等字符串格式方法被弃用）。</li>
+    <li id="c3"><a href="https://zod.dev/error-formatting" target="_blank" rel="noopener">Zod — Formatting errors</a>（<code>z.flattenError()</code> 输出 <code>fieldErrors</code> / <code>formErrors</code>，适合 API 返回）。</li>
+    <li id="c4"><a href="https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html" target="_blank" rel="noopener">OWASP — Input Validation Cheat Sheet</a>（校验必须在服务端进行；客户端校验可被绕过；校验 ≠ 安全，需配合其它防御）。</li>
+    <li id="c5"><a href="https://expressjs.com/en/guide/error-handling.html" target="_blank" rel="noopener">Express — Error Handling</a>（同步错误自动捕获；Express 5 自动处理返回 Promise 的 reject；错误处理中间件需 4 参数 (err,req,res,next) 且放在最后；next(err) 触发；res.headersSent 时委托默认处理器）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0007 · 上一课 <a href="0006-middleware-and-request-body.html">中间件与处理 POST 请求体</a> · 下一课（预告）：<em>路由拆分与分层（express.Router）</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

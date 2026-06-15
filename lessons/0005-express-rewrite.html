@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0005 · 用 Express 重写你的服务器</title>
+<link rel="stylesheet" href="lesson.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0005 / 阶段 2</span>
+</nav>
+
+<div class="kicker">Lesson 0005 · Node.js 后端之路 · 阶段 2 开始</div>
+<h1>用 Express 重写你的服务器<br>（告别 <code>if/else</code> 路由）</h1>
+
+<div class="mission">
+  <b>欢迎进入阶段 2。</b> 你已经亲手感受过原生 <code>http</code> 的「痛」——一堆 <code>if/else</code> 判断 <code>method</code> 和 <code>url</code>、手动 <code>JSON.stringify</code>、手动设响应头。
+  现在用 <strong>Express</strong>（Node 最流行的 web 框架）把它收拾干净。<strong>LinkPulse 真正的 API，就从这一课开始搭。</strong>
+</div>
+
+<h2><span class="n">1</span>为什么需要框架？Express 是什么</h2>
+<p>
+  原生 <code>http</code> 能用，但你已经体会到它的麻烦：路由靠手写 <code>if/else</code>、返回 JSON 要自己 <code>stringify</code> + 设 <code>Content-Type</code>、方法判断也得自己来……项目一大就乱成一团。
+</p>
+<p>
+  <strong>框架（framework）</strong>就是把这些<strong>重复、易错</strong>的活儿封装好，给你一套干净的 API 和结构，让你专注写业务。
+  <strong>Express</strong> 是 Node 最流行的极简 web 框架：生态最大、文档最全、招聘最常见<sup><a href="#c1">1</a></sup>。它是你最好的起点。
+</p>
+<div class="rw">
+  🌍 <b>实战选型：</b>除了 Express，还有 <b>Fastify</b>（更快、更现代）、<b>NestJS</b>（更结构化、适合大型项目，咱们<strong>阶段 4</strong> 会用到它）。
+  但 Express 概念最简单、资料最多，<strong>先用它把 web 框架的核心吃透</strong>，换别的框架都是触类旁通。
+</div>
+
+<h2><span class="n">2</span>第一次装真实依赖：<code>npm install express</code></h2>
+<p>Express 不是 Node 内置的，要从 npm 装。在项目根目录运行：</p>
+<pre><code>npm install express</code></pre>
+<p>这条命令做了两件事：</p>
+<ul>
+  <li>把 express 及其依赖下载到 <code>node_modules/</code> 文件夹；</li>
+  <li>在 <code>package.json</code> 里记下这条依赖（还记得 0004 讲的 <strong>dependencies</strong> 吗？——运行时要用的包就在这）：</li>
+</ul>
+<pre><code>"dependencies": {
+  "express": "^5.1.0"        // 版本号可能不同
+}</code></pre>
+<div class="rw">
+  🌍 <b>实战：</b>这正是你 0004 给 <code>node_modules/</code> 加 <code>.gitignore</code> 的原因——它不进 git。别人拿到你的项目，只要 <code>package.json</code> 在，一句 <code>npm install</code> 就能把所有依赖重建出来。
+</div>
+
+<h2><span class="n">3</span>用 Express 重写</h2>
+<p>同样的服务器，看看 Express 版有多干净。先感受「同一个 <code>/api/health</code>，两种写法」：</p>
+<div class="cmp">
+  <div>
+    <h4>😩 原生 http（你之前写的）</h4>
+<pre><code>if (url === '/api/health'
+    &amp;&amp; method === 'GET') {
+  res.writeHead(200, {
+    'Content-Type': 'application/json'
+  })
+  res.end(JSON.stringify(payload))
+  return
+}</code></pre>
+  </div>
+  <div>
+    <h4>😌 Express</h4>
+<pre><code>app.get('/api/health', (req, res) =&gt; {
+  res.json(payload)
+})</code></pre>
+  </div>
+</div>
+<p>完整的 Express 版服务器：</p>
+<pre><code>import express from 'express'
+
+const app = express()
+const port = 3000
+
+app.get('/', (req, res) =&gt; {
+  res.send('Hello Guys!')                       // 发文本
+})
+
+app.get('/api/health', (req, res) =&gt; {
+  res.json({ status: 'ok', uptime: process.uptime() })   // 发 JSON
+})
+
+// 没匹配到任何路由 → 404（放在所有路由的最后）
+app.use((req, res) =&gt; {
+  res.status(404).send('Not Found')
+})
+
+app.listen(port, () =&gt; {
+  console.log(`Server running at http://localhost:${port}/`)
+})</code></pre>
+<p>对照着读，你会发现 Express 帮你包办了三件原来要手写的事：</p>
+<ul>
+  <li><strong>路由分发</strong>：<code>app.get(path, handler)</code> 直接按「方法 + 路径」匹配，<strong>不用再写 <code>if/else</code> 判断 <code>method</code>/<code>url</code></strong><sup><a href="#c1">1</a></sup>。<code>app.post</code>、<code>app.put</code>、<code>app.delete</code> 同理。</li>
+  <li><strong>发 JSON</strong>：<code>res.json(obj)</code> 自动帮你设好 <code>Content-Type: application/json</code> 并序列化——告别手动 <code>writeHead</code> + <code>JSON.stringify</code>。</li>
+  <li><strong>状态码</strong>：<code>res.status(404).send(...)</code> 链式调用，清爽。</li>
+</ul>
+
+<h2><span class="n">4</span>路由参数 <code>:param</code> —— 这就是 LinkPulse 的核心</h2>
+<p>
+  真实 API 的路径里常有<strong>动态部分</strong>，比如「获取第 42 号用户」是 <code>/users/42</code>。
+  在 Express 里，用 <code>:</code> 定义这种<strong>路由参数（route param）</strong>，捕获到的值会放进 <code>req.params</code><sup><a href="#c1">1</a></sup>：
+</p>
+<pre><code>app.get('/greet/:name', (req, res) =&gt; {
+  const { name } = req.params      // 访问 /greet/kellen → name 就是 "kellen"
+  res.json({ hello: name })
+})</code></pre>
+<div class="rw">
+  🌍 <b>这正是 LinkPulse 的心脏：</b>用户访问短链 <code>/abc123</code>，你用 <code>app.get('/:code', …)</code> 配 <code>req.params.code</code> 拿到 <code>"abc123"</code>，再去数据库查它对应的原始网址、然后跳转。
+  <strong>你今天写的 <code>/greet/:name</code>，就是短链跳转的雏形。</strong>
+</div>
+<p class="note">
+  📌 顺带认识两个「兄弟」（下节细讲）：<code>req.query</code> 接收 <code>?key=value</code> 这种查询参数；<code>req.body</code> 接收 POST 提交的请求体。三者别搞混：<strong><code>params</code> 在路径里、<code>query</code> 在 <code>?</code> 后、<code>body</code> 在请求体里。</strong>
+</p>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">路由参数</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">你定义了路由 <code>app.get('/links/:code', handler)</code>。当有人访问 <code>/links/abc123</code> 时，在 handler 里怎么拿到 <code>abc123</code>？</p>
+  <button class="opt" data-correct="true"  data-ex="对！冒号定义的路由参数，捕获到的值都放在 req.params 里，键名就是冒号后面的名字（code）。">req.params.code</button>
+  <button class="opt" data-correct="false" data-ex="不对。req.query 接收的是 ?code=abc123 这种问号后面的查询参数，不是路径里的 :code。">req.query.code</button>
+  <button class="opt" data-correct="false" data-ex="不对。req.body 是 POST/PUT 请求体里的数据（下节课讲），GET 路径参数不在这里。">req.body.code</button>
+  <button class="opt" data-correct="false" data-ex="不对。req.url 是完整路径字符串（如 '/links/abc123'），它本身没有 .code 这个属性。">req.url.code</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：用 Express 重写（15 分钟）</h3>
+  <ol>
+    <li>在项目根目录运行 <code>npm install express</code>，然后打开 <code>package.json</code> 确认 <code>dependencies</code> 里多了 <code>express</code>。</li>
+    <li>新建 <code>01-node-core/express-server.js</code>，照 §3 写出 Express 版（<code>/</code> 和 <code>/api/health</code>）。</li>
+    <li>加一个<strong>路由参数</strong>路由：<code>/greet/:name</code>，返回 <code>{ hello: name }</code>。</li>
+    <li>加上 §3 末尾的 404 处理（<code>app.use</code> 放最后）。</li>
+    <li>运行 <code>node --watch 01-node-core/express-server.js</code>（或把 <code>package.json</code> 的 <code>dev</code> 脚本指向它，再 <code>npm run dev</code>）。</li>
+    <li>挨个访问验证：<code>/</code>、<code>/api/health</code>、<code>/greet/你的名字</code>、<code>/不存在的路径</code>（应返回 404）。</li>
+  </ol>
+  <p style="font-size:.86rem;margin:.6rem 0 0;color:var(--muted)">💡 对比一下：实现同样的功能，Express 版是不是短了一大截、也好读多了？这就是框架的价值。</p>
+</div>
+
+<div class="src">
+  📖 <strong>本课首选精读源</strong>：
+  <a href="https://expressjs.com/en/guide/routing/" target="_blank" rel="noopener">Express 官方 — Routing</a>
+  （<code>app.METHOD</code>、路由路径、路由参数 <code>req.params</code> 讲得很清楚）。
+</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑通后发我：</b>① <code>package.json</code> 里 <code>dependencies</code> 那段；② 访问 <code>/greet/你的名字</code> 返回的 JSON；③ 访问不存在路径拿到的 404。
+  有报错直接贴。<br>
+  <strong>下一课预告（0006）：</strong><strong>中间件（middleware）</strong>——Express 的灵魂概念，以及怎么用 <code>express.json()</code> 接收 POST 提交的数据（<code>req.body</code>）。学完你就能写「创建短链」这种需要提交数据的接口了。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://expressjs.com/en/guide/routing/" target="_blank" rel="noopener">Express 官方 — Routing</a>（app.get/app.post 等按方法路由、路由参数 req.params、res.json）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0005 · 上一课 <a href="0004-modules-and-npm-project.html">0004 — 模块系统与正式项目</a> · 下一课（预告）：<em>0006 — 中间件与处理 POST 请求体</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+
+</body>
+</html>

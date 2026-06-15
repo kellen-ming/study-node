@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0004 · 模块系统与你的第一个正式项目</title>
+<link rel="stylesheet" href="lesson.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0004 / 阶段 1</span>
+</nav>
+
+<div class="kicker">Lesson 0004 · Node.js 后端之路</div>
+<h1>模块系统与你的<br>第一个正式项目（ESM · npm）</h1>
+
+<div class="mission">
+  <b>从「零散脚本」到「正式项目」。</b> 到现在你的代码还是几个孤立的 <code>.js</code> 文件。
+  真实产品（包括 LinkPulse）都是一个由 <code>package.json</code> 管理的<strong>项目</strong>：能装依赖、能用一条命令启动、代码拆成多个模块互相复用。
+  这节课就把你的零散文件，升级成专业的项目骨架。
+</div>
+
+<h2><span class="n">1</span>模块：把代码拆成多个文件</h2>
+<p>
+  一个应用不可能挤在一个文件里。<strong>模块（module）</strong>就是把功能拆到不同文件、各管一摊、再互相引用。
+  这点你在前端早就熟了（<code>import/export</code>）。Node 里有<strong>两套</strong>模块语法，你都会遇到：
+</p>
+<div class="cmp">
+  <div>
+    <h4>CommonJS（Node 老传统，前几课用的）</h4>
+<pre><code>// math.js —— 导出
+function add(a, b) { return a + b }
+module.exports = { add }
+
+// 别处 —— 导入
+const { add } = require('./math')</code></pre>
+  </div>
+  <div>
+    <h4>ESM（你前端用的那套，现代标准）</h4>
+<pre><code>// math.js —— 导出
+export function add(a, b) { return a + b }
+
+// 别处 —— 导入
+import { add } from './math.js'</code></pre>
+  </div>
+</div>
+<p class="note">
+  👀 一眼对比：<code>require / module.exports</code>（CommonJS） vs <code>import / export</code>（ESM）。功能类似，但下一节你会看到，在 Node 里<strong>选哪套是有讲究的</strong>。
+</p>
+
+<h2><span class="n">2</span>在 Node 里到底用 ESM 还是 CommonJS？</h2>
+<p>
+  在前端，模块的事是<strong>打包器（webpack/vite）</strong>替你搞定的。但在 Node 里没有打包器，<strong>是你自己来定</strong>——而且两套各有脾气：
+</p>
+<ul>
+  <li><strong>ESM（<code>import/export</code>）</strong>：JavaScript 的<strong>官方标准</strong>，支持 tree-shaking、顶层 <code>await</code>；Node 官方文档现在都用它<sup><a href="#c1">1</a></sup>。</li>
+  <li><strong>CommonJS（<code>require</code>）</strong>：Node 的老传统，不用任何配置 <code>node 文件</code> 就能跑；生态里<strong>海量老包</strong>仍是它。</li>
+</ul>
+<p>默认情况下，Node 把 <code>.js</code> 当 CommonJS。要让它用 ESM，在 <code>package.json</code> 里加一行<sup><a href="#c1">1</a></sup>：</p>
+<pre><code>{
+  "type": "module"
+}</code></pre>
+<p>（或者把文件后缀改成 <code>.mjs</code>。）加了之后，<code>.js</code> 文件就能用 <code>import/export</code> 了。</p>
+<p>另外，导入<strong>内置模块</strong>推荐写 <code>node:</code> 前缀，明确「这是 Node 内置的，不是 npm 包」：</p>
+<pre><code>import { createServer } from 'node:http'   // 推荐
+import fs from 'node:fs'</code></pre>
+
+<div class="rw">
+  🌍 <b>实战：新项目用哪个？</b> <b>新项目直接上 ESM</b>——它是未来，也和你 MISSION 里「最终用 TypeScript」一致（TS + ESM 是主流组合）。
+  你只会在维护老项目、或某些工具链里才碰到 CommonJS。
+</div>
+<div class="rw">
+  ⚠️ <b>实战中真实会踩的坑（interop）：</b><code>require()</code> <strong>无法</strong>加载纯 ESM 的包，会报 <code>ERR_REQUIRE_ESM</code>。
+  而现在越来越多新包（如新版本的一些库）<strong>只发 ESM</strong>。这是 CommonJS 项目升级时最常见的报错之一——你用 ESM 就基本绕开了它。
+</div>
+<p class="note">
+  🔗 <b>还记得你那个未声明的 <code>body</code> 吗？</b> ESM <strong>默认就是严格模式（strict mode）</strong>，那种「忘了声明变量」的写法在 ESM 里会直接报错——等于强制你写更规范的代码。这也是 ESM 更「专业」的一点。
+</p>
+
+<h2><span class="n">3</span><code>package.json</code>：项目的身份证 + 说明书</h2>
+<p>前端你见过它。这里快速过一遍，重点看它在<strong>后端</strong>怎么用<sup><a href="#c2">2</a></sup>：</p>
+<pre><code>{
+  "name": "linkpulse",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}</code></pre>
+<ul>
+  <li><strong>scripts</strong>：把常用命令起个名，用 <code>npm run &lt;名字&gt;</code> 执行<sup><a href="#c2">2</a></sup>。后端最常见的就是<strong>启动服务器</strong>：开发用 <code>npm run dev</code>（带 <code>--watch</code> 自动重启），上线用 <code>npm start</code>。</li>
+  <li><strong>dependencies</strong>：<strong>运行时</strong>就需要的包（如 <code>express</code>、<code>prisma</code>）。<code>npm install express</code> 会装到这里。</li>
+  <li><strong>devDependencies</strong>：<strong>只在开发/构建</strong>时用的包（如 <code>typescript</code>、<code>eslint</code>）。<code>npm install -D eslint</code> 会装到这里。</li>
+</ul>
+<div class="rw">
+  🌍 <b>实战：为什么要分 deps / devDeps？</b> 上线部署时可以只装 <code>dependencies</code>（<code>npm install --omit=dev</code>），让生产环境更小更快——你的测试框架、lint 工具没必要打进生产镜像。
+</div>
+
+<h2><span class="n">4</span>一个真实 Node 项目长什么样</h2>
+<p>这是后端项目的<strong>惯用结构</strong>（LinkPulse 以后也会长这样）：</p>
+<div class="tree">linkpulse/
+├── <b>package.json</b>      # 项目身份证 + npm 命令
+├── <b>node_modules/</b>     # 依赖（npm 装的，<b>不提交</b>到 git）
+├── <b>.gitignore</b>        # 告诉 git 忽略哪些（首先就是 node_modules）
+├── <b>src/</b>              # 源码都放这
+│   ├── server.js       # 入口
+│   └── health.js       # 拆出来的一个模块
+└── README.md</div>
+<div class="rw">
+  🌍 <b>实战必做：<code>.gitignore</code> 一定要忽略 <code>node_modules/</code>。</b>
+  它动辄几百 MB、能用 <code>npm install</code> 随时重建，<strong>绝不该提交到仓库</strong>。这是每个 Node 项目的第一条铁律。
+</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">ESM</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">要让 Node 把 <code>.js</code> 文件当作 ESM（能用 <code>import/export</code>）来运行，下面哪种做法对？</p>
+  <button class="opt" data-correct="false" data-ex="不对。Node 默认把 .js 当 CommonJS，不配置的话用 import 会报错。">import/export 在 Node 里默认就能用</button>
+  <button class="opt" data-correct="true"  data-ex="对！在 package.json 里加 \"type\": \"module\"（或把文件改成 .mjs 后缀），Node 才会把 .js 当 ESM。">在 package.json 里设置 "type": "module"</button>
+  <button class="opt" data-correct="false" data-ex="不对，没有这种包；ESM 是 Node 内置支持的，靠配置开启，不靠装包。">先 npm 安装一个叫 esm 的包</button>
+  <button class="opt" data-correct="false" data-ex="不对，没有 .es 这个后缀。开启 ESM 用 .mjs 后缀或 type:module。">把文件后缀改成 .es</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：把零散文件升级成正式 ESM 项目（15 分钟）</h3>
+  <ol>
+    <li>在仓库根目录运行 <code>npm init -y</code> → 生成 <code>package.json</code>（<code>-y</code> 表示全用默认值）。</li>
+    <li>打开 <code>package.json</code>，加上 <code>"type": "module"</code>，并把 <code>scripts</code> 改成：
+<pre><code>"scripts": {
+  "dev": "node --watch 01-node-core/first-server.js",
+  "start": "node 01-node-core/first-server.js"
+}</code></pre></li>
+    <li>把 <code>first-server.js</code> 顶部的
+      <code>const { createServer } = require('http')</code>
+      改成 ESM 写法：<code>import { createServer } from 'node:http'</code>。</li>
+    <li><strong>练一下拆模块：</strong>新建 <code>01-node-core/health.js</code>：
+<pre><code>export function healthPayload() {
+  return { status: 'ok', uptime: process.uptime() }
+}</code></pre>
+      然后在 <code>first-server.js</code> 里导入它（⚠️ <strong>ESM 相对导入必须带 <code>.js</code> 后缀</strong>，这点和前端打包器不同，很多人踩）：
+<pre><code>import { healthPayload } from './health.js'
+// ...把 /api/health 那行改成：
+res.end(JSON.stringify(healthPayload()))</code></pre></li>
+    <li>新建 <code>.gitignore</code>，写入一行 <code>node_modules/</code>。</li>
+    <li>用 <code>npm run dev</code> 启动（带 <code>--watch</code>，以后改代码自动重启，告别手动重启）。</li>
+    <li>浏览器/curl 访问 <code>/api/health</code>，确认仍返回那段 JSON —— 说明你的模块拆分成功了。✅</li>
+  </ol>
+</div>
+
+<div class="rw">
+  🌍 <b>实战补充：<code>npm run dev</code> 这套「热重启」工作流</b>是日常开发标配。Node 18+ 内置的 <code>--watch</code> 够用了；
+  你可能还会听到 <code>nodemon</code>（第三方老牌方案，功能更多）。两者都是为了「改完即生效、不用手动重启」。
+</div>
+
+<div class="src">
+  📖 <strong>本课首选精读源</strong>：
+  <a href="https://nodejs.org/api/esm.html" target="_blank" rel="noopener">Node.js 官方 — ECMAScript modules</a>（ESM 的完整规则）；
+  项目配置见 <a href="https://docs.npmjs.com/cli/v11/configuring-npm/package-json/" target="_blank" rel="noopener">npm 官方 — package.json</a>。
+</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑通后发我：</b>① 你的 <code>package.json</code> 内容；② <code>npm run dev</code> 启动成功的终端输出；③ 访问 <code>/api/health</code> 的结果。
+  遇到报错（尤其是 import 路径、<code>type:module</code> 相关的）直接贴给我。<br>
+  <strong>下一课预告（0005）：</strong>进入<strong>阶段 2</strong>——用 <strong>Express</strong> 重写你的服务器，你会第一次 <code>npm install</code> 一个真实依赖，并亲身体会到「框架帮你把那堆 <code>if/else</code> 路由收拾得多干净」。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://nodejs.org/api/esm.html" target="_blank" rel="noopener">Node.js 官方 — Modules: ECMAScript modules</a>（type:module 开启 ESM、node: 前缀、import/export）</li>
+    <li id="c2"><a href="https://docs.npmjs.com/cli/v11/configuring-npm/package-json/" target="_blank" rel="noopener">npm 官方 — package.json</a>（scripts、dependencies / devDependencies）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0004 · 上一课 <a href="0003-first-http-server.html">0003 — HTTP 基础与第一个服务器</a> · 下一课（预告）：<em>0005 — 用 Express 重写服务器（阶段 2）</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+
+</body>
+</html>

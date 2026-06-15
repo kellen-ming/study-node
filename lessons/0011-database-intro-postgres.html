@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0011 · 数据库入门：为什么选 PostgreSQL + 用 Docker 跑起来</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  /* 本章专属可视化：只定义本章独有的类名 */
+  /* 「内存丢数据」对比演示 */
+  .restart{display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; justify-content:center; margin:1.1rem 0; font-size:.78rem}
+  .restart .step{background:#fbf7ee; border:1px solid var(--rule); border-radius:6px; padding:.5rem .7rem; text-align:center; min-width:6.5em}
+  .restart .step b{display:block; font-size:.72rem; color:var(--muted); font-weight:600; margin-bottom:.2rem; font-family:inherit}
+  .restart .gone{border-color:var(--no); color:var(--no); background:var(--no-bg)}
+  .restart .arrow{color:var(--accent); font-weight:700; font-size:1rem}
+
+  /* 关系型 vs 文档型 两栏对照 */
+  .vs{display:grid; grid-template-columns:1fr 1fr; gap:.7rem; margin:1.1rem 0}
+  .vs .card{border:1px solid var(--rule); border-radius:8px; padding:.8rem .9rem; background:#fffefb}
+  .vs .card h4{margin:.1rem 0 .5rem; font-size:.92rem}
+  .vs .sql h4{color:#2e6e3f}
+  .vs .nosql h4{color:#4a6da7}
+  .vs .card ul{margin:.3rem 0; padding-left:1.1rem; font-size:.84rem}
+  .vs .card li{margin:.3rem 0}
+  @media(max-width:520px){ .vs{grid-template-columns:1fr} }
+
+  /* 数据库术语层级图 */
+  .hier{font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.78rem; background:var(--code-bg); border-radius:6px; padding:.9rem 1.1rem; line-height:1.7; margin:1rem 0}
+  .hier .lv{display:block}
+  .hier .tag{color:var(--accent); font-weight:600}
+
+  /* docker run 参数逐项拆解 */
+  .flags{font-size:.84rem; margin:1rem 0; border-collapse:collapse; width:100%}
+  .flags th,.flags td{border:1px solid var(--rule); padding:.45rem .6rem; text-align:left; vertical-align:top}
+  .flags th{background:#f4f1e4; color:var(--accent); font-weight:600; white-space:nowrap}
+  .flags code{white-space:nowrap}
+
+  /* 连接串配色拆解 */
+  .url{font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.92rem; background:var(--code-bg); border-radius:6px; padding:.9rem 1.1rem; margin:1rem 0; line-height:1.9; word-break:break-all; text-align:center}
+  .url .scheme{color:#9a3b2e; font-weight:600}
+  .url .user{color:#2e6e3f; font-weight:600}
+  .url .pass{color:#b5651d; font-weight:600}
+  .url .host{color:#4a6da7; font-weight:600}
+  .url .port{color:#7a4fa3; font-weight:600}
+  .url .db{color:#1a1a17; font-weight:600; text-decoration:underline}
+  .urlkey{font-size:.8rem; margin:.4rem 0 0; line-height:1.9}
+  .urlkey .dot{display:inline-block; width:.7em; height:.7em; border-radius:50%; vertical-align:middle; margin-right:.35em}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0011 / 阶段 3</span>
+</nav>
+
+<div class="kicker">Lesson 0011 · Node.js 后端之路</div>
+<h1>数据库入门：为什么选 PostgreSQL<br>用 Docker 把它跑起来</h1>
+
+<div class="mission">
+  <b>为什么学这个？</b> 到 Lesson 0006 为止，你的 <code>POST /api/links</code> 返回的是一个<strong>假短码</strong>——它没存到任何地方，服务一重启就<strong>全没了</strong>。
+  一个能<strong>上线收费</strong>的 LinkPulse，必须把<strong>短链、点击记录、用户、订阅</strong>这些数据<strong>持久</strong>地保存下来，并且在很多人同时访问时还能<strong>正确、可靠</strong>。这正是<strong>数据库（database）</strong>的工作。
+  这一课我们先想清楚<strong>为什么要数据库</strong>、<strong>为什么 LinkPulse 选 PostgreSQL</strong>，再用 <strong>Docker 一条命令</strong>把一个真正的 Postgres 跑起来、连上它。下一课（0012）我们就在里面用 SQL 建表、写数据。
+</div>
+
+<h2><span class="n">1</span>为什么需要数据库：内存里的「假短码」有什么问题</h2>
+<p>
+  先回忆你现在的代码。Lesson 0006 的 <code>POST /api/links</code> 大致是这样（用伪代码表示）：
+</p>
+<pre><code>// 现状：短码只活在内存里
+app.post('/api/links', (req, res) =&gt; {
+  const url = req.body.url;
+  const code = Math.random().toString(36).slice(2, 8); // 假短码
+  res.json({ code, url });   // ← 返回完就忘了，哪儿都没存
+});</code></pre>
+<p>
+  就算你把它存进一个模块级变量（比如 <code>const links = []</code>），它<strong>仍然只活在 Node 进程的内存里</strong>。这会带来三个致命问题，正好对应数据库要解决的三件事：
+</p>
+
+<h3 style="font-size:1.02rem;margin:1.4rem 0 .4rem">问题一：持久化（Persistence）——重启就丢</h3>
+<p>
+  <strong>持久化</strong>指的是：数据被写到<strong>磁盘</strong>这种「断电也不消失」的介质上，进程重启、机器重启都还在。内存（RAM）是<strong>易失（volatile）</strong>的——进程一退出，里面的东西就归零。
+</p>
+<div class="restart">
+  <div class="step"><b>内存方案</b>用户创建 100 条短链</div>
+  <span class="arrow">→</span>
+  <div class="step">你部署新版本<br>（重启进程）</div>
+  <span class="arrow">→</span>
+  <div class="step gone">100 条全没了 ✗</div>
+</div>
+<p class="note" style="border:none;text-align:center;margin-top:-.3rem">
+  类比：内存像<strong>白板</strong>（下班擦掉），数据库像<strong>账本</strong>（写上去就一直在）。SaaS 卖的就是「你的数据一直安全地在那」——丢数据等于丢客户。
+</p>
+
+<h3 style="font-size:1.02rem;margin:1.4rem 0 .4rem">问题二：并发安全（Concurrency）——多人同时写会乱</h3>
+<p>
+  你的后端会被<strong>很多请求同时</strong>打到。假设两个用户在同一毫秒都想生成短码 <code>abc123</code>，纯内存的数组没有任何机制阻止「两条一样的短码」同时写进去——短链就<strong>撞车</strong>了，A 用户点开会跳到 B 用户的目标网址。
+</p>
+<p>
+  数据库专门处理这种<strong>并发（concurrency）</strong>：它用<strong>事务（transaction）</strong>和<strong>约束（constraint，如「这一列必须唯一」）</strong>来保证「即使一万个请求同时来，结果也是一致、正确的」。PostgreSQL 以可靠性著称<sup><a href="#c1">1</a></sup>，并发正确性正是它的核心价值之一。这部分原理我们后面专门讲，这里你先建立印象：<strong>并发正确，是自己用数组手搓搞不定、必须交给数据库的事</strong>。
+</p>
+
+<h3 style="font-size:1.02rem;margin:1.4rem 0 .4rem">问题三：强大查询（Querying）——内存里筛数据要自己写循环</h3>
+<p>
+  LinkPulse 上线后你会想问：「<em>上周哪条短链点击最多？</em>」「<em>这个用户名下所有短链按创建时间倒序的前 20 条是什么？</em>」用内存数组，你得自己写一堆 <code>filter / sort / slice</code>，数据一多就慢、就难维护。数据库用 <strong>SQL</strong> 一句话就能表达这种查询，而且内部有<strong>索引（index）</strong>帮你查得飞快（下一课会用到）。
+</p>
+
+<div class="rw">🌍 <b>实战：</b>「先用内存数组/全局变量顶着，以后再换数据库」是新手最常见、也最容易反噬的决定。一旦业务跑起来，<strong>数据迁移</strong>比一开始就用数据库痛苦十倍。正确做法是：项目第一天就接上数据库，哪怕表里只有一行。我们这门课就是这么做的——<strong>这一章把库跑起来，下一章马上往里写真数据</strong>。</div>
+
+<h2><span class="n">2</span>关系型 vs 文档型：SQL 还是 NoSQL</h2>
+<p>
+  「数据库」是个大家族。你最常听到两类：<strong>关系型数据库（Relational / SQL）</strong>和<strong>文档型数据库（Document / 一种 NoSQL）</strong>。先用前端能秒懂的方式说清区别。
+</p>
+<div class="vs">
+  <div class="card sql">
+    <h4>关系型（SQL）· 如 PostgreSQL、MySQL</h4>
+    <p style="font-size:.84rem;margin:.2rem 0">数据存在<strong>表（table）</strong>里：像一张 Excel——固定的<strong>列（column）</strong>、一行行<strong>记录（row）</strong>。表之间用<strong>关系</strong>连起来（哪条点击属于哪条短链）。</p>
+    <ul>
+      <li><strong>强 schema</strong>：每列类型预先定好，写错类型直接报错（数据更干净）</li>
+      <li>天生擅长<strong>关联多张表</strong>查询（JOIN）</li>
+      <li><strong>事务 / 约束</strong>强，数据一致性有保证</li>
+      <li>用标准语言 <strong>SQL</strong> 查询</li>
+    </ul>
+  </div>
+  <div class="card nosql">
+    <h4>文档型（NoSQL）· 如 MongoDB</h4>
+    <p style="font-size:.84rem;margin:.2rem 0">数据存成一个个 <strong>JSON 文档</strong>，扔进<strong>集合（collection）</strong>里。每个文档结构可以不一样，像前端直接存 JS 对象。</p>
+    <ul>
+      <li><strong>弱 / 无 schema</strong>：字段随时加，灵活但容易脏</li>
+      <li>读「一整个对象」很顺手，<strong>跨集合关联</strong>偏弱</li>
+      <li>水平扩展、海量非结构化数据是其长处</li>
+      <li>各家自有查询 API，不是标准 SQL</li>
+    </ul>
+  </div>
+</div>
+<p>
+  一个常见误解：「SQL 老、NoSQL 新、所以 NoSQL 更好」。<strong>不对</strong>。它们解决的是不同问题：
+</p>
+<ul style="font-size:.92rem">
+  <li><strong>数据之间关系清晰、需要强一致</strong>（电商订单、账务、SaaS 的用户/订阅）→ 关系型更稳。</li>
+  <li><strong>结构松散、变化快、要存海量日志/画像、能接受最终一致</strong> → 文档型 / 其他 NoSQL 有优势。</li>
+</ul>
+<div class="note">
+  <strong>澄清两个词：</strong>「SQL」严格说是<strong>查询语言</strong>，「关系型数据库」是<strong>数据库种类</strong>；日常口语里大家用「SQL 数据库」指代关系型，「NoSQL」泛指非关系型的一大类（文档型只是其中一种，还有键值、列式、图等）。本课不展开 NoSQL 细节，知道「有这么一类、各有适用场景」即可。
+</div>
+
+<h2><span class="n">3</span>为什么 LinkPulse 选 PostgreSQL</h2>
+<p>
+  先认识它：<strong>PostgreSQL</strong>（常简称 <strong>Postgres</strong>）是一个<strong>开源的对象-关系型数据库系统（object-relational database system）</strong>，有 35 年以上的活跃开发历史，以<strong>可靠性、功能完整、性能</strong>著称<sup><a href="#c1">1</a></sup>。它高度遵循 SQL 标准——到 PostgreSQL 18 已满足 SQL:2023 核心标准 177 项强制特性中的至少 170 项<sup><a href="#c1">1</a></sup>，所以你学到的 SQL 知识是<strong>通用、可迁移</strong>的。
+</p>
+<p>对 LinkPulse 这种短链 + 分析 + 订阅的 SaaS，选 Postgres 的理由很具体：</p>
+<ul style="font-size:.93rem">
+  <li><strong>关系天然清晰：</strong>「一个用户拥有多条短链，一条短链产生多次点击」——这是教科书般的<strong>一对多关系</strong>，关系型表 + 外键表达得干净利落（第 4 节讲外键）。</li>
+  <li><strong>可靠、一致：</strong>订阅状态、计费、配额这些数据<strong>错一条都不行</strong>，Postgres 的事务和约束给你兜底。</li>
+  <li><strong>查询强：</strong>访问分析要做各种统计聚合（按天、按地区、按来源），SQL + 索引能高效搞定；Postgres 还原生支持 <code>JSONB</code>，需要时也能存半结构化数据——<strong>关系型为主、文档能力随时备用</strong>。</li>
+  <li><strong>生态强、托管多：</strong>Node 有成熟驱动（<code>pg</code>，下一阶段会用），云上有大量托管 Postgres（见下方实战），从本地到生产路径顺滑。</li>
+</ul>
+<div class="rw">🌍 <b>实战：</b>2020 年后大量新创 SaaS 的默认起手式就是 <strong>「Postgres 打底，需要时再加专用组件」</strong>：用它存核心业务数据，缓存交给 Redis、全文搜索交给专门引擎或 Postgres 自带的全文检索。先用一个可靠的关系型库把业务跑通，远比一上来堆五种数据库明智——<strong>LinkPulse 全程只用 Postgres 也完全够用到付费上线</strong>。</div>
+
+<h2><span class="n">4</span>基础术语：数据库 / 表 / 行 / 列 / 主键 / 外键</h2>
+<p>
+  在敲命令前，把几个核心词一次讲清。官方定义其实非常简洁<sup><a href="#c2">2</a></sup>：
+</p>
+<div class="hier">
+  <span class="lv"><span class="tag">数据库集群 cluster</span> —— 一个 Postgres 服务实例管理的<strong>所有数据库</strong>的集合</span>
+  <span class="lv">└─ <span class="tag">数据库 database</span> —— 一组<strong>表</strong>的集合（如 <code>linkpulse</code>）</span>
+  <span class="lv">　　└─ <span class="tag">表 table</span> —— 一个有名字的「<strong>行的集合</strong>」（如 <code>links</code>）</span>
+  <span class="lv">　　　　├─ <span class="tag">列 column</span> —— 表的「字段」，每列有<strong>固定的数据类型</strong></span>
+  <span class="lv">　　　　└─ <span class="tag">行 row</span> —— 一条记录，拥有该表<strong>同一组命名的列</strong></span>
+</div>
+<p style="font-size:.92rem">官方原话：「关系型数据库管理系统（RDBMS）就是管理存在<strong>关系（relation，其实就是表的数学叫法）</strong>里的数据的系统；每张表是一个命名的<strong>行</strong>的集合，同一张表里每一行都有同一组命名的<strong>列</strong>，每列有特定的<strong>数据类型</strong>；表被分组进<strong>数据库</strong>，由单个服务实例管理的一组数据库构成<strong>集群</strong>。」<sup><a href="#c2">2</a></sup></p>
+
+<p>前端类比一句话带过：</p>
+<ul style="font-size:.92rem">
+  <li><strong>表</strong> ≈ 一个 TypeScript 的对象数组的「形状定义」；<strong>列</strong> ≈ 接口里的字段 + 类型；<strong>行</strong> ≈ 数组里的一个对象。</li>
+</ul>
+<p>还有两个<strong>新概念必须讲透</strong>，因为它们是关系型数据库的灵魂：</p>
+
+<h3 style="font-size:1.02rem;margin:1.4rem 0 .4rem">主键 Primary Key（PK）：每行的「身份证」</h3>
+<p>
+  <strong>主键</strong>是表里一列（或几列），它的值<strong>唯一</strong>且<strong>不为空</strong>，用来<strong>唯一标识每一行</strong>。就像每个人有唯一身份证号。LinkPulse 的 <code>links</code> 表会有一个 <code>id</code> 主键；短码 <code>code</code> 则会加<strong>唯一约束</strong>，保证不撞车。
+</p>
+<h3 style="font-size:1.02rem;margin:1.4rem 0 .4rem">外键 Foreign Key（FK）：连接两张表的「引用」</h3>
+<p>
+  <strong>外键</strong>是一列，它的值必须<strong>指向另一张表某行的主键</strong>，以此表达「<strong>谁属于谁</strong>」。这是「关系型」里「关系」二字的来源。
+</p>
+<pre><code>users 表                       links 表
+┌────┬─────────┐              ┌────┬───────┬───────────┐
+│ id │ email   │              │ id │ code  │ user_id ← FK
+├────┼─────────┤              ├────┼───────┼───────────┤
+│ 1  │ a@x.com │   ←──┐       │ 10 │ abc12 │    1      │
+│ 2  │ b@x.com │      └───────│ 11 │ xyz98 │    1      │  这两条短链都属于用户 1
+└────┴─────────┘              └────┴───────┴───────────┘
+            外键 user_id 必须等于某个真实存在的 users.id</code></pre>
+<p style="font-size:.92rem">
+  外键的妙处在于<strong>数据库帮你守规矩</strong>：你<strong>无法</strong>插入一条 <code>user_id=999</code> 但 <code>users</code> 里根本没有 999 的短链——这叫<strong>引用完整性（referential integrity）</strong>。在内存数组里，这种「孤儿数据」全靠你自己小心；在 Postgres 里，它从源头上被禁止。这些表和外键我们<strong>下一课（0012）正式动手建</strong>，本课先把概念吃透、把库跑起来。
+</p>
+
+<h2><span class="n">5</span>用 Docker 一条命令把 Postgres 跑起来</h2>
+<p>
+  传统上「装数据库」意味着在本机安装一堆软件、改系统配置，卸载还卸不干净。我们换个现代做法：用 <strong>Docker</strong>。
+</p>
+<p>
+  <strong>Docker 是什么（轻量版）：</strong>它能把一个软件（比如 Postgres）连同它需要的<strong>运行环境</strong>一起打包成一个<strong>镜像（image）</strong>；你用这个镜像启动一个<strong>容器（container）</strong>——容器是一个<strong>隔离的小盒子</strong>，里面的 Postgres 跑得好好的，却<strong>不碰你本机</strong>的系统。类比：镜像像「<strong>软件的安装光盘 + 操作系统</strong>」，容器像「<strong>用这张盘开起来的一台一次性小电脑</strong>」。本课你只需把它当成「<strong>起数据库的遥控器</strong>」，深入留到后面的运维阶段。
+</p>
+<div class="note">
+  <strong>前置：</strong>先安装 <strong>Docker Desktop</strong>（Mac / Windows）并把它打开（菜单栏出现鲸鱼图标即就绪）。验证：终端运行 <code>docker --version</code> 能打印版本号即可。本课不教安装 Docker 本身，遇到问题告诉我。
+</div>
+<p>确认 Docker 在跑后，<strong>一条命令</strong>起一个 Postgres：</p>
+<pre><code>docker run --name linkpulse-db \
+  -e POSTGRES_PASSWORD=devpassword \
+  -e POSTGRES_USER=linkpulse \
+  -e POSTGRES_DB=linkpulse \
+  -p 5432:5432 \
+  -v linkpulse_pgdata:/var/lib/postgresql/data \
+  -d postgres:16</code></pre>
+<p>官方镜像页给出的最小示例其实只要密码这一项<sup><a href="#c3">3</a></sup>：<code>docker run --name some-postgres -e POSTGRES_PASSWORD=mysecretpassword -d postgres</code>。我们在它基础上把每个参数讲清：</p>
+<table class="flags">
+  <tr><th>参数</th><th>作用</th></tr>
+  <tr><td><code>docker run</code></td><td>根据镜像启动一个新容器。</td></tr>
+  <tr><td><code>--name linkpulse-db</code></td><td>给容器起个名字，方便之后 <code>docker stop / start linkpulse-db</code> 引用，不用记一长串 ID。</td></tr>
+  <tr><td><code>-e POSTGRES_PASSWORD=…</code></td><td><strong>唯一必填</strong>的环境变量：设超级用户密码<sup><a href="#c3">3</a></sup>。<code>-e</code> = environment（往容器里塞环境变量）。<strong>本地随便设，别用真密码。</strong></td></tr>
+  <tr><td><code>-e POSTGRES_USER=linkpulse</code></td><td>可选：创建这个用户（拥有超级权限）。不写则默认用户名 <code>postgres</code><sup><a href="#c3">3</a></sup>。</td></tr>
+  <tr><td><code>-e POSTGRES_DB=linkpulse</code></td><td>可选：初始化时建一个同名数据库。不写则默认用 <code>POSTGRES_USER</code> 的名字建库<sup><a href="#c3">3</a></sup>。</td></tr>
+  <tr><td><code>-p 5432:5432</code></td><td><strong>端口映射</strong>：把<strong>本机的 5432</strong> 转发到<strong>容器内的 5432</strong>（Postgres 默认端口）。格式是 <code>-p 本机端口:容器端口</code>。有了它，你本机的程序（你的 Node 服务、psql）才连得进去。</td></tr>
+  <tr><td><code>-v linkpulse_pgdata:/var/lib/postgresql/data</code></td><td><strong>数据卷（volume）</strong>：把容器内存数据的目录映射到一个由 Docker 管理的命名卷。<strong>关键</strong>：删了容器，数据还在这个卷里——下次重建照样能读到。不加它，容器一删数据就真没了。<sup><a href="#c3">3</a></sup></td></tr>
+  <tr><td><code>-d</code></td><td>detached，<strong>后台</strong>运行，终端立刻还给你（不会被日志占住）。想看日志：<code>docker logs -f linkpulse-db</code>。</td></tr>
+  <tr><td><code>postgres:16</code></td><td>用哪个<strong>镜像 : 标签（版本）</strong>。<strong>务必钉版本</strong>（这里 <code>16</code>），别用 <code>latest</code>——否则哪天镜像升级，你团队各人版本就不一致了。</td></tr>
+</table>
+<div class="note">
+  反斜杠 <code>\</code> 是在 Mac/Linux 的 zsh/bash 里把<strong>一条长命令拆成多行</strong>的续行符（让命令更好读）。复制时连 <code>\</code> 一起复制即可；若在 Windows PowerShell，请把它写成<strong>一行</strong>（去掉所有 <code>\</code> 和换行）。
+</div>
+<p>常用配套命令（先混个眼熟）：</p>
+<pre><code>docker ps                 # 看正在跑的容器（应能看到 linkpulse-db、0.0.0.0:5432）
+docker logs linkpulse-db  # 看 Postgres 启动日志，出现 "database system is ready" 就绪
+docker stop linkpulse-db  # 停（数据不丢，在卷里）
+docker start linkpulse-db # 再启动（沿用同一份数据）
+docker rm -f linkpulse-db # 删容器（卷仍在；想连卷一起删要另外 docker volume rm）</code></pre>
+<div class="rw">🌍 <b>实战：</b><strong>「用 Docker 起数据库」是当下本地开发的事实标配。</strong> 好处是：① <strong>不污染本机</strong>（不用全局装 Postgres，删容器干干净净）；② <strong>一键重建、版本统一</strong>（团队都跑 <code>postgres:16</code>，杜绝「在我机器上是好的」）；③ 一个项目想要一套独立的库，再 <code>docker run</code> 一个换个端口即可。等学到运维阶段，这套 <code>docker run</code> 通常会写进 <code>docker-compose.yml</code><sup><a href="#c3">3</a></sup>，一行 <code>docker compose up</code> 起全套——本课先体会单条命令。</div>
+
+<h2><span class="n">6</span>连接串 DATABASE_URL：怎么「找到并登录」这个库</h2>
+<p>
+  库跑起来了，程序怎么连进去？需要五样信息：<strong>用什么协议、用谁的身份、密码是啥、连哪台机器的哪个端口、进哪个数据库</strong>。把它们拼成一个标准 URL，就是<strong>连接串（connection string / connection URI）</strong>。PostgreSQL 官方定义了这个 URI 格式<sup><a href="#c4">4</a></sup>：
+</p>
+<pre><code>postgresql://[user[:password]@]host[:port][/dbname][?参数]</code></pre>
+<p>对照我们上面起的容器，连接串就是（<code>postgres://</code> 和 <code>postgresql://</code> 两种写法等价，官方都接受<sup><a href="#c4">4</a></sup>）：</p>
+
+<div class="url">
+  <span class="scheme">postgres://</span><span class="user">linkpulse</span>:<span class="pass">devpassword</span>@<span class="host">localhost</span>:<span class="port">5432</span>/<span class="db">linkpulse</span>
+</div>
+<div class="urlkey">
+  <span class="dot" style="background:#9a3b2e"></span><span class="scheme" style="font-family:inherit">scheme 协议</span>：固定 <code>postgres://</code>，告诉客户端「这是个 Postgres 连接」。<br>
+  <span class="dot" style="background:#2e6e3f"></span><span class="user" style="font-family:inherit">user 用户名</span>：<code>linkpulse</code>（我们用 <code>POSTGRES_USER</code> 设的）。<br>
+  <span class="dot" style="background:#b5651d"></span><span class="pass" style="font-family:inherit">password 密码</span>：<code>devpassword</code>。<br>
+  <span class="dot" style="background:#4a6da7"></span><span class="host" style="font-family:inherit">host 主机</span>：<code>localhost</code>（容器通过 <code>-p</code> 映射到了本机）。<br>
+  <span class="dot" style="background:#7a4fa3"></span><span class="port" style="font-family:inherit">port 端口</span>：<code>5432</code>（Postgres 默认；省略则用默认端口<sup><a href="#c4">4</a></sup>）。<br>
+  <span class="dot" style="background:#1a1a17"></span><span class="db" style="font-family:inherit">dbname 数据库名</span>：<code>linkpulse</code>。
+</div>
+
+<p>
+  下一阶段我们会用 Node 的官方 Postgres 驱动 <code>pg</code> 连库，它的标准用法正是把这串喂给 <code>connectionString</code><sup><a href="#c5">5</a></sup>，而约定俗成的环境变量名就叫 <code>DATABASE_URL</code>（Heroku 等平台带火的惯例<sup><a href="#c5">5</a></sup>）：
+</p>
+<pre><code>// 预告：下一阶段会这样连（本课不用写，先看一眼形状）
+import { Pool } from 'pg';
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });</code></pre>
+<p>所以我们现在就把这串放进项目根目录的 <code>.env</code> 文件——你在 TypeScript 项目（0010 起）里已经习惯用环境变量管理配置了：</p>
+<pre><code># study-node/.env
+DATABASE_URL=postgres://linkpulse:devpassword@localhost:5432/linkpulse</code></pre>
+<div class="rw">🌍 <b>实战：</b><strong>连接串里有密码，所以 <code>.env</code> 绝不能进 Git。</strong> 务必在 <code>.gitignore</code> 里加上 <code>.env</code>，并提交一份不含真值的 <code>.env.example</code>（值留空或写假值）给队友照着填。把密码、连接串这类<strong>密钥（secrets）</strong>写进环境变量、而不是硬编码进源码，是后端最基本的安全红线——这次泄露的可能只是本地库，等接了生产托管库，泄露就是事故。</div>
+<div class="rw">🌍 <b>实战：</b><strong>本地用 Docker，生产用托管 Postgres。</strong> 真要上线 LinkPulse，没人自己拿裸机扛数据库——大家用<strong>托管服务</strong>：Supabase、Neon（都对小项目友好、有免费档）、或 AWS RDS。它们替你搞定备份、高可用、打补丁，并直接给你一条 <code>DATABASE_URL</code>（通常还要求 <code>?sslmode=require</code>）。<strong>美妙之处</strong>：因为你的代码只认 <code>process.env.DATABASE_URL</code>，从本地 Docker 切到云上托管，<strong>改的只是 <code>.env</code> 里那一行</strong>，代码一字不动。</div>
+
+<h2><span class="n">7</span>连上去看一眼：psql 或 GUI</h2>
+<p>怎么确认库真的能用？连进去看一眼。两条路任选：</p>
+<h3 style="font-size:1.02rem;margin:1.2rem 0 .4rem">路线 A：psql（命令行，最快验证）</h3>
+<p>
+  <strong>psql</strong> 是 Postgres 官方自带的交互式命令行客户端。容器里就装着它，所以<strong>不用在本机额外装任何东西</strong>，直接进容器用<sup><a href="#c3">3</a></sup>：
+</p>
+<pre><code>docker exec -it linkpulse-db psql -U linkpulse -d linkpulse</code></pre>
+<p style="font-size:.9rem"><code>docker exec</code>=在<strong>正在跑的</strong>容器里执行命令；<code>-it</code>=交互式（你能输入）；后面是「用 <code>linkpulse</code> 用户连 <code>linkpulse</code> 库」。看到提示符变成 <code>linkpulse=#</code> 就成功了。试几条：</p>
+<pre><code>linkpulse=# SELECT version();   -- 打印 PostgreSQL 版本，证明连通
+linkpulse=# \l                  -- 列出所有数据库（应看到 linkpulse）
+linkpulse=# \dt                 -- 列出当前库的表（现在是空的，正常！）
+linkpulse=# \q                  -- 退出</code></pre>
+<div class="note">以 <code>\</code> 开头的是 psql 的<strong>元命令</strong>（meta-command，psql 自己的快捷指令，不是 SQL）；以分号结尾的才是发给数据库执行的 SQL。现在 <code>\dt</code> 显示「没有表」完全正确——<strong>建表是下一课的事</strong>。</div>
+<h3 style="font-size:1.02rem;margin:1.2rem 0 .4rem">路线 B：GUI 客户端（看得更直观）</h3>
+<p>
+  如果你更习惯图形界面，装一个数据库 GUI：<strong>TablePlus</strong>（轻巧好看）或 <strong>DBeaver</strong>（免费、功能全）。新建连接时，把上面 <code>.env</code> 里那几项填进去即可：
+</p>
+<div class="tree">Host:     localhost
+Port:     5432
+User:     linkpulse
+Password: devpassword
+Database: linkpulse</div>
+<p style="font-size:.92rem">连上后你能在侧边栏点开数据库、看到（暂时为空的）表列表，以后建了表能直接点开看数据、改数据。<strong>前端工程师通常更喜欢这条路</strong>——所见即所得。</p>
+<div class="rw">🌍 <b>实战：</b>日常开发里大多数人<strong>两样都用</strong>：写脚本、做 CI、快速 <code>SELECT</code> 验证用 <strong>psql</strong>（能进容器、能塞进自动化）；浏览数据、调试一条复杂记录、给非技术同事演示用 <strong>GUI</strong>（直观）。先有一个能连上的客户端，比纠结用哪个更重要。</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">概念辨析</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">在 <code>docker run ... -p 5432:5432 ...</code> 里，<code>-p 5432:5432</code> 起什么作用？</p>
+  <button class="opt" data-correct="true" data-ex="对。格式是 -p 本机端口:容器端口，把本机 5432 转发到容器内 Postgres 的 5432，本机的 psql / Node 服务才连得进去。">把本机的 5432 端口映射到容器内 Postgres 的 5432 端口，让本机程序能连进容器</button>
+  <button class="opt" data-correct="false" data-ex="错。设密码是 -e POSTGRES_PASSWORD=...，不是 -p。-p 管的是端口映射。">设置数据库的登录密码</button>
+  <button class="opt" data-correct="false" data-ex="错。持久化靠的是 -v 数据卷（volume），把容器内 /var/lib/postgresql/data 映射出来；-p 与持久化无关。">让数据在容器删除后仍然保留（持久化）</button>
+  <button class="opt" data-correct="false" data-ex="错。指定版本是镜像标签 postgres:16，与 -p 无关；-p 只管端口。">指定 PostgreSQL 的版本号</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：把 LinkPulse 的数据库跑起来并连上</h3>
+  <ol>
+    <li>装好并打开 <strong>Docker Desktop</strong>；终端跑 <code>docker --version</code> 确认可用。</li>
+    <li>用第 5 节那条命令起容器（建议照抄，含 <code>--name linkpulse-db</code>、<code>-p 5432:5432</code>、<code>-v</code> 卷、钉死 <code>postgres:16</code>）。</li>
+    <li>跑 <code>docker ps</code>，确认 <code>linkpulse-db</code> 在跑、且 PORTS 列出现 <code>0.0.0.0:5432-&gt;5432</code>；再 <code>docker logs linkpulse-db</code> 看到 <em>database system is ready to accept connections</em>。</li>
+    <li>在项目根目录（<code>study-node</code>）新建 <code>.env</code>，写入：<br><code>DATABASE_URL=postgres://linkpulse:devpassword@localhost:5432/linkpulse</code></li>
+    <li>在 <code>.gitignore</code> 里加一行 <code>.env</code>；再建一个 <code>.env.example</code>，内容把密码换成占位（如 <code>...:你的密码@...</code>）。</li>
+    <li>用 <strong>psql</strong>（<code>docker exec -it linkpulse-db psql -U linkpulse -d linkpulse</code>）<strong>或</strong> <strong>TablePlus/DBeaver</strong> 连上。</li>
+    <li>连上后跑 <code>SELECT version();</code> 和 <code>\dt</code>（GUI 里看表列表）：看到版本号、且当前库<strong>没有表</strong>，就大功告成——下一课我们就来填它。</li>
+  </ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://hub.docker.com/_/postgres" target="_blank" rel="noopener">Docker Hub · postgres 官方镜像页</a>（环境变量、数据卷、psql 连接、docker-compose 示例都在这页）；概念部分配合 <a href="https://www.postgresql.org/docs/current/tutorial-concepts.html" target="_blank" rel="noopener">PostgreSQL 官方文档 · 2.2 Concepts</a> 一起读。</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑通后发我：</b>① <code>docker ps</code> 的输出（能看到 <code>linkpulse-db</code> 和 5432 映射）；② <code>SELECT version();</code> 打印出的 PostgreSQL 版本字符串；③ 确认 <code>\dt</code>（或 GUI）显示当前库还没有表。卡在 Docker 没装好 / 连不上 / 端口被占（<code>5432</code> 已被本机别的 Postgres 占用）任何一步，把报错原样贴给我。<br>
+  <strong>下一课预告：</strong>Lesson 0012《SQL 基础：建表与增删改查》——我们用 SQL 在这个库里建出 <code>links</code> 表（带唯一短码 <code>code</code>），把<strong>增、删、改、查（INSERT / SELECT / UPDATE / DELETE）</strong>亲手跑一遍，让 LinkPulse 真正「记住」短链。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://www.postgresql.org/about/" target="_blank" rel="noopener">PostgreSQL — About</a>（35+ 年开发史；以可靠性/功能/性能著称；PostgreSQL 18 满足 SQL:2023 核心 177 项强制特性中至少 170 项）。</li>
+    <li id="c2"><a href="https://www.postgresql.org/docs/current/tutorial-concepts.html" target="_blank" rel="noopener">PostgreSQL Documentation — 2.2. Concepts</a>（RDBMS / 关系 / 表 / 行 / 列 / 数据类型 / 数据库 / 集群的官方定义）。</li>
+    <li id="c3"><a href="https://hub.docker.com/_/postgres" target="_blank" rel="noopener">Docker Hub — postgres 官方镜像</a>（<code>docker run --name some-postgres -e POSTGRES_PASSWORD=… -d postgres</code>；POSTGRES_PASSWORD 为唯一必填，POSTGRES_USER / POSTGRES_DB 可选及其默认值；数据卷 <code>/var/lib/postgresql/data</code>；<code>psql</code> 连接与 docker-compose 示例）。</li>
+    <li id="c4"><a href="https://www.postgresql.org/docs/current/libpq-connect.html" target="_blank" rel="noopener">PostgreSQL Documentation — 32.1. Database Connection Control Functions</a>（连接 URI 格式 <code>postgresql://[user[:password]@]host[:port][/dbname][?params]</code>；<code>postgresql://</code> 与 <code>postgres://</code> 等价；端口省略用默认）。</li>
+    <li id="c5"><a href="https://node-postgres.com/features/connecting" target="_blank" rel="noopener">node-postgres — Connecting</a>（用 <code>connectionString</code> 传入 Postgres URI；<code>DATABASE_URL</code> 作为环境变量的常见约定，如 Heroku）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0011 · 上一课 <a href="0010-add-typescript.html">为项目引入 TypeScript</a> · 下一课（预告）：<em>SQL 基础：建表与增删改查</em>（<a href="0012-sql-basics.html">0012</a>）</p>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

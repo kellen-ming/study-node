@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0012 · SQL 基础：建表与增删改查</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  /* 本章专属：把一张表画成可视化网格，帮助前端工程师建立「行/列」直觉 */
+  .sqltable{border-collapse:collapse; font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.78rem; margin:1rem 0; width:100%; background:#fffefb}
+  .sqltable th,.sqltable td{border:1px solid var(--rule); padding:.4rem .6rem; text-align:left}
+  .sqltable th{background:#f4f1e4; color:var(--accent); font-weight:600}
+  .sqltable caption{caption-side:top; text-align:left; font-size:.78rem; color:var(--muted); margin-bottom:.3rem}
+  .sqltable .pk{color:var(--accent); font-weight:600}
+  .crud{display:flex; flex-wrap:wrap; gap:.4rem; justify-content:center; margin:1.2rem 0; font-size:.78rem}
+  .crud .box{background:#fbf7ee; border:1px solid var(--accent); border-radius:6px; padding:.45rem .7rem; font-family:"SF Mono",Menlo,Consolas,monospace; text-align:center; min-width:5.5em}
+  .crud .lbl{display:block; font-size:.68rem; color:var(--muted); margin-top:.15rem; font-family:inherit}
+  .dim{color:var(--muted)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0012 / 阶段 3</span>
+</nav>
+
+<div class="kicker">Lesson 0012 · Node.js 后端之路</div>
+<h1>SQL 基础：建表与增删改查<br>（让 LinkPulse 真正「记住」短链）</h1>
+
+<div class="mission">
+  <b>从「假短码」到「真数据」。</b> Lesson 0006 里你的 <code>POST /api/links</code> 返回的是一个<strong>假短码</strong>——服务一重启就全忘了。
+  上一课（0011）你装好了 PostgreSQL 并连上了它，但库里还<strong>空空如也</strong>。
+  这一课你将学会用 <strong>SQL</strong> 亲手<strong>建表（CREATE TABLE）</strong>、<strong>插入 / 查询 / 更新 / 删除（INSERT / SELECT / UPDATE / DELETE）</strong>，再加上 <strong>约束</strong> 和 <strong>索引</strong>。
+  目标很具体：建一张 <code>links</code> 表（含唯一短码 <code>code</code>），在里面把增删改查跑一遍——为下一课（0013 正式数据建模）热身。
+  本课命令全是 <strong>SQL</strong>，直接敲在数据库里；你的 TypeScript 项目下一课才会去调用它们。
+</div>
+
+<h2><span class="n">1</span>SQL 是什么：一种「声明式」语言</h2>
+<p>
+  <strong>SQL</strong>（Structured Query Language，结构化查询语言）是和<strong>关系型数据库</strong>（如 PostgreSQL）对话的标准语言。
+  你用它来定义表、写入数据、查询数据。它是一门正式的、由 ISO 标准化的语言<sup><a href="#c1">1</a></sup>，PostgreSQL 在标准之上做了不少扩展（后面会遇到几个）。
+</p>
+<p>
+  对前端工程师最关键的一个认知差异是：<strong>SQL 是「声明式（declarative）」的</strong>，而你熟悉的 JavaScript 大多是「命令式（imperative）」的。
+</p>
+<div class="cmp">
+  <div>
+    <h4>命令式（你写 JS 的习惯）</h4>
+    <pre><code>// 一步步告诉机器「怎么做」
+const found = [];
+for (const link of allLinks) {
+  if (link.code === 'abc123') {
+    found.push(link);
+  }
+}</code></pre>
+  </div>
+  <div>
+    <h4>声明式（SQL 的方式）</h4>
+    <pre><code>-- 只描述「我要什么」，
+-- 怎么找由数据库自己决定
+SELECT * FROM links
+WHERE code = 'abc123';</code></pre>
+  </div>
+</div>
+<p>
+  在 SQL 里，你<strong>不写循环、不写「先扫第一行再扫第二行」</strong>。你只声明「我想要 <code>code</code> 等于 abc123 的那些行」，
+  数据库的<strong>查询规划器（query planner）</strong>会自己决定用什么策略去取——是逐行扫描，还是走索引（本章第 5 节）。这正是声明式的威力：你管「要什么」，引擎管「怎么高效拿到」。
+</p>
+<div class="note">
+  <strong>约定：</strong>SQL 关键字（<code>SELECT</code>、<code>FROM</code>…）<strong>大小写不敏感</strong>，写成大写只是社区惯例，方便一眼区分关键字和你自己的表名/列名。每条语句以 <strong>分号 <code>;</code></strong> 结尾。<code>--</code> 开头是单行注释。
+</div>
+
+<h2><span class="n">2</span>DDL：用 CREATE TABLE 建表</h2>
+<p>
+  SQL 语句按用途分两大类，先记住这个分类，后面不会乱：
+</p>
+<ul>
+  <li><strong>DDL</strong>（Data Definition Language，数据<strong>定义</strong>语言）：定义「数据长什么样」——建表、改表、删表。代表：<code>CREATE TABLE</code> / <code>ALTER TABLE</code> / <code>DROP TABLE</code>。</li>
+  <li><strong>DML</strong>（Data Manipulation Language，数据<strong>操作</strong>语言）：操作「表里的数据」——增删改查。代表：<code>INSERT</code> / <code>SELECT</code> / <code>UPDATE</code> / <code>DELETE</code>（第 3~4 节）。</li>
+</ul>
+<p>
+  一张<strong>表（table）</strong>就像一个有严格表头的电子表格：每一<strong>列（column）</strong>有固定的<strong>名字</strong>和<strong>数据类型</strong>；每一<strong>行（row）</strong>是一条记录<sup><a href="#c2">2</a></sup>。建表就是先把「表头」和「每列的类型」定义清楚。
+</p>
+
+<h3 style="font-size:1.05rem;margin:1.6rem 0 .4rem">先认识几个常用数据类型</h3>
+<p>PostgreSQL 类型很多，但 LinkPulse 起步只需要这几个<sup><a href="#c3">3</a></sup>：</p>
+<table class="sqltable">
+  <caption>本章会用到的 PostgreSQL 数据类型</caption>
+  <tr><th>类型</th><th>存什么</th><th>LinkPulse 里的例子</th></tr>
+  <tr><td><code>text</code></td><td>任意长度的字符串（不用像别的库那样指定长度上限）</td><td>长网址 <code>long_url</code>、短码 <code>code</code></td></tr>
+  <tr><td><code>integer</code> / <code>int</code></td><td>整数（约 ±21 亿）</td><td>点击次数 <code>click_count</code></td></tr>
+  <tr><td><code>bigint</code></td><td>大整数（约 ±920 亿亿）</td><td>主键 <code>id</code>（量大时）</td></tr>
+  <tr><td><code>boolean</code></td><td>真/假 <code>true</code>/<code>false</code></td><td>是否启用 <code>is_active</code></td></tr>
+  <tr><td><code>timestamptz</code></td><td>带时区的时间戳（见下方实战）</td><td>创建时间 <code>created_at</code></td></tr>
+</table>
+
+<div class="rw">🌍 <b>实战：用 timestamptz 存时间，别用 timestamp。</b>
+  <code>timestamptz</code> 是 <code>timestamp with time zone</code> 的简写<sup><a href="#c3">3</a></sup>。它在存入时会把时间<strong>归一化为 UTC</strong> 保存，读取时再按当前会话时区呈现。
+  而裸 <code>timestamp</code>（不带时区）只是「墙上的钟点」，不知道是哪个时区的，跨时区一定出错。
+  LinkPulse 将来要做<strong>访问分析</strong>，用户可能在全球任何地方点链接——<strong>所有时间列一律用 <code>timestamptz</code></strong>，这是后端老手的肌肉记忆。
+</div>
+
+<h3 style="font-size:1.05rem;margin:1.6rem 0 .4rem">自增主键：identity 还是 serial？</h3>
+<p>
+  每张表通常需要一个能<strong>唯一标识每行</strong>的「身份证号」，最常见的做法是一个<strong>自动递增的整数</strong>——插入第 1 行它是 1，第 2 行自动变 2，你不用手动管。
+  PostgreSQL 提供<strong>两种</strong>写法<sup><a href="#c4">4</a></sup>：
+</p>
+<div class="cmp">
+  <div>
+    <h4>✅ identity（SQL 标准，推荐新项目）</h4>
+    <pre><code>id bigint
+   GENERATED ALWAYS AS IDENTITY
+   PRIMARY KEY</code></pre>
+  </div>
+  <div>
+    <h4>serial（PostgreSQL 老写法，仍很常见）</h4>
+    <pre><code>id bigserial PRIMARY KEY
+-- 等价于：创建一个序列 +
+-- DEFAULT nextval(序列)</code></pre>
+  </div>
+</div>
+<p>
+  官方文档说明：<code>serial</code> / <code>bigserial</code> <strong>并不是真正的类型</strong>，只是「创建自增列」的一种书写便利——背后会自动建一个<strong>序列（sequence）</strong>对象并设默认值<sup><a href="#c4">4</a></sup>。
+  而 <code>GENERATED ALWAYS AS IDENTITY</code> 是 <strong>SQL 标准</strong>的等价能力，且 identity 列会被<strong>自动标记为 <code>NOT NULL</code></strong><sup><a href="#c5">5</a></sup>。
+  本课用 <code>identity</code>——它更标准、行为更清晰，PostgreSQL 官方也将其列为推荐方向。
+</p>
+
+<h3 style="font-size:1.05rem;margin:1.6rem 0 .4rem">动手：创建 links 表</h3>
+<p>把上面的知识拼起来，这就是 LinkPulse 的第一张表（先不加约束，下一节逐个加上）：</p>
+<pre><code>CREATE TABLE links (
+  id          bigint GENERATED ALWAYS AS IDENTITY,
+  code        text,
+  long_url    text,
+  created_at  timestamptz
+);</code></pre>
+<p>
+  执行后你就有了一张<strong>空表</strong>，结构如下（还没有任何行）：
+</p>
+<table class="sqltable">
+  <caption>links 表的结构（4 列，0 行）</caption>
+  <tr><th>id <span class="dim">bigint</span></th><th>code <span class="dim">text</span></th><th>long_url <span class="dim">text</span></th><th>created_at <span class="dim">timestamptz</span></th></tr>
+  <tr><td colspan="4" style="text-align:center;color:var(--muted)">（暂无数据）</td></tr>
+</table>
+<div class="note">
+  <strong>怎么执行这些 SQL？</strong> 沿用上一课：在终端运行 <code>psql</code> 连进你的数据库（例如 <code>psql linkpulse</code>），把语句粘进去回车即可；语句末尾别忘了分号。想看建好的表结构，敲 <code>\d links</code>。
+</div>
+
+<h2><span class="n">3</span>DML（上）：INSERT 写入与 SELECT 查询</h2>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .4rem">INSERT：往表里塞数据</h3>
+<p>官方推荐写法是<strong>显式列出列名</strong>，这样就不依赖列的物理顺序，将来加列也不会错位<sup><a href="#c6">6</a></sup>：</p>
+<pre><code>INSERT INTO links (code, long_url, created_at)
+VALUES ('abc123', 'https://example.com/very/long/path', now());</code></pre>
+<p>
+  注意我们<strong>没写 <code>id</code></strong>——因为它是 identity 列，数据库会自动填 1、2、3…。
+  <code>now()</code> 是 PostgreSQL 内置函数，返回当前的 <code>timestamptz</code>。一次插多行也可以，用逗号隔开多组 <code>VALUES</code><sup><a href="#c6">6</a></sup>：
+</p>
+<pre><code>INSERT INTO links (code, long_url, created_at) VALUES
+  ('gh-repo', 'https://github.com/linkpulse',        now()),
+  ('docs01',  'https://www.postgresql.org/docs/',     now()),
+  ('blog42',  'https://example.com/blog/2026/launch', now());</code></pre>
+<p>现在表里有 4 行了：</p>
+<table class="sqltable">
+  <caption>links 表（4 行）</caption>
+  <tr><th>id</th><th>code</th><th>long_url</th><th>created_at</th></tr>
+  <tr><td class="pk">1</td><td>abc123</td><td>https://example.com/very/long/path</td><td>2026-06-15 09:01:22+00</td></tr>
+  <tr><td class="pk">2</td><td>gh-repo</td><td>https://github.com/linkpulse</td><td>2026-06-15 09:01:35+00</td></tr>
+  <tr><td class="pk">3</td><td>docs01</td><td>https://www.postgresql.org/docs/</td><td>2026-06-15 09:01:35+00</td></tr>
+  <tr><td class="pk">4</td><td>blog42</td><td>https://example.com/blog/2026/launch</td><td>2026-06-15 09:01:35+00</td></tr>
+</table>
+
+<h3 style="font-size:1.05rem;margin:1.6rem 0 .4rem">SELECT：把数据读出来</h3>
+<p>这是你今后用得最多的语句。最基本的形态是「选哪些列、从哪张表」<sup><a href="#c7">7</a></sup>：</p>
+<pre><code>SELECT * FROM links;              -- * 表示所有列
+SELECT code, long_url FROM links; -- 只取这两列</code></pre>
+<p>真正有用的是三个修饰子句，<strong>注意它们的书写顺序是固定的</strong>：<code>WHERE</code> → <code>ORDER BY</code> → <code>LIMIT</code>。</p>
+<ul>
+  <li><strong><code>WHERE</code> 过滤行</strong>：只保留满足条件的行。条件里 <strong>判断相等用单个 <code>=</code></strong>（不是 JS 的 <code>===</code>），字符串用<strong>单引号</strong>。</li>
+  <li><strong><code>ORDER BY</code> 排序</strong>：<code>ASC</code> 升序（默认）、<code>DESC</code> 降序。</li>
+  <li><strong><code>LIMIT</code> 限制条数</strong>：只要前 N 行（做分页、取最新几条时必备）。</li>
+</ul>
+<pre><code>-- 按 code 精确查找（这正是 LinkPulse 重定向时要做的事）
+SELECT id, long_url FROM links
+WHERE code = 'abc123';
+
+-- 最近创建的 3 条短链：按时间倒序，只取前 3
+SELECT code, created_at FROM links
+ORDER BY created_at DESC
+LIMIT 3;</code></pre>
+<p>
+  其中 <code>WHERE code = 'abc123'</code> 就是 LinkPulse 的核心动作：用户访问 <code>短域名/abc123</code> 时，后端拿 <code>abc123</code> 去查出对应的 <code>long_url</code>，再 301/302 跳过去。下一课你会在 TypeScript 里调用它。
+</p>
+<div class="rw">🌍 <b>实战：SQL 注入风险——现在就要拉响警报。</b>
+  你也许想这样在 TypeScript 里「拼」出这条查询：<br>
+  <code style="color:var(--no)">const sql = `SELECT * FROM links WHERE code = '${userInput}'`</code><br>
+  <strong>千万别这么做。</strong> 如果 <code>userInput</code> 是 <code>' OR '1'='1</code>，拼出来就变成 <code>... WHERE code = '' OR '1'='1'</code>——<strong>条件恒真，整张表被拖走</strong>；更恶意的输入甚至能删库。这就是经典的 <strong>SQL 注入（SQL Injection）</strong>，常年位列 Web 安全风险榜首。
+  本章你手敲固定 SQL 没问题，但<strong>一旦把用户输入拼进 SQL 字符串就危险</strong>。正确解法是<strong>参数化查询</strong>（占位符 + 参数分离）或用 ORM——这正是下一阶段（ORM/Prisma）要教的，先把这根弦绷上。
+</div>
+
+<h2><span class="n">4</span>DML（下）：UPDATE 改与 DELETE 删</h2>
+<p>四个增删改查动作，合称 <strong>CRUD</strong>（Create / Read / Update / Delete），是几乎所有后端 API 的底层骨架：</p>
+<div class="crud">
+  <span class="box">INSERT<span class="lbl">Create 增</span></span>
+  <span class="box">SELECT<span class="lbl">Read 查</span></span>
+  <span class="box">UPDATE<span class="lbl">Update 改</span></span>
+  <span class="box">DELETE<span class="lbl">Delete 删</span></span>
+</div>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .4rem">UPDATE：修改已有行</h3>
+<p>用 <code>SET</code> 指定改哪些列、改成什么；用 <code>WHERE</code> 圈定改哪些行：</p>
+<pre><code>UPDATE links
+SET long_url = 'https://example.com/new-destination'
+WHERE code = 'abc123';</code></pre>
+<div class="note" style="border-color:var(--no)">
+  <strong style="color:var(--no)">⚠️ 最经典、最致命的失误：UPDATE / DELETE 忘了写 WHERE。</strong>
+  <code>UPDATE links SET long_url = '...'</code>（没有 <code>WHERE</code>）会把<strong>每一行</strong>都改成同一个值！
+  动手前先把同样的条件用 <code>SELECT</code> 跑一遍，确认命中的正是你想改的那些行，再换成 <code>UPDATE</code>/<code>DELETE</code>。这是从血泪里总结出的安全习惯。
+</div>
+
+<h3 style="font-size:1.05rem;margin:1.6rem 0 .4rem">DELETE：删除行</h3>
+<pre><code>DELETE FROM links
+WHERE code = 'blog42';   -- 只删这一行</code></pre>
+<p>
+  <code>DELETE FROM links;</code>（不带 <code>WHERE</code>）会<strong>清空整张表</strong>——再次提醒，<code>WHERE</code> 是你的安全带。
+  注意 <code>DELETE</code> 删的是「表里的行」；要删整张表（结构都不要了）才用 DDL 的 <code>DROP TABLE links;</code>，别搞混。
+</p>
+
+<h2><span class="n">5</span>约束（Constraints）：让数据库替你守规矩</h2>
+<p>
+  <strong>约束</strong>是你在建表时立下的<strong>规则</strong>，写错/违规的数据会被数据库<strong>当场拒绝</strong>。
+  这是关系型数据库相比「自己在代码里 if 判断」的巨大优势：规则在数据库里<strong>集中、强制、永远生效</strong>，哪怕将来有别的程序、别的同事直接写库，也绕不过去。下面四个是入门必备<sup><a href="#c8">8</a></sup>。
+</p>
+
+<table class="sqltable">
+  <caption>四大常用约束一览</caption>
+  <tr><th>约束</th><th>含义</th><th>违反时</th></tr>
+  <tr><td><code>NOT NULL</code></td><td>这列不能为空（不能没有值）</td><td>插入/更新报错</td></tr>
+  <tr><td><code>UNIQUE</code></td><td>这列的值在全表不能重复</td><td>插入重复值报错</td></tr>
+  <tr><td><code>PRIMARY KEY</code></td><td>主键 = <code>UNIQUE</code> + <code>NOT NULL</code>，每张表至多一个，用作行的唯一身份</td><td>重复或为空都报错</td></tr>
+  <tr><td><code>REFERENCES</code><br>（外键）</td><td>这列的值必须在<strong>另一张表</strong>里真实存在</td><td>指向不存在的行时报错</td></tr>
+</table>
+
+<h3 style="font-size:1.05rem;margin:1.6rem 0 .4rem">NOT NULL：必须有值</h3>
+<p>官方建议：在多数表设计里，<strong>大部分列都应该是 NOT NULL</strong><sup><a href="#c8">8</a></sup>——一个连目标网址都没有的短链毫无意义，所以 <code>long_url</code> 必须有值。</p>
+
+<h3 style="font-size:1.05rem;margin:1.2rem 0 .4rem">UNIQUE：全表不重复</h3>
+<p>LinkPulse 的命脉就在这里：<strong>短码 <code>code</code> 绝不能重复</strong>——否则 <code>abc123</code> 同时指向两个网址，重定向就乱套了。<code>UNIQUE</code> 约束帮你把这条铁律交给数据库强制执行。</p>
+<div class="rw">🌍 <b>实战：用 UNIQUE 约束防短码碰撞，而不是靠应用层「先查再插」。</b>
+  新手常这样生成短码：先 <code>SELECT</code> 看 <code>code</code> 在不在，不在就 <code>INSERT</code>。但在<strong>并发</strong>下（两个请求同一瞬间都查到「不存在」），会双双插入<strong>同一个 code</strong>——这叫<strong>竞态条件（race condition）</strong>。
+  正确姿势：给 <code>code</code> 加 <code>UNIQUE</code> 约束，<strong>直接 INSERT</strong>；万一撞了，数据库会抛<strong>唯一性冲突错误</strong>，你的代码捕获它、换个码重试即可。让数据库做最终裁判，比应用层「先查再插」可靠得多。顺带一提：<code>UNIQUE</code> 会自动建一个 B-tree 索引<sup><a href="#c8">8</a></sup>，所以按 <code>code</code> 查询也顺带变快了。
+</div>
+<div class="note">
+  <strong>一个易踩的冷知识：</strong>默认情况下，<code>UNIQUE</code> 约束<strong>认为两个 NULL 不相等</strong>，所以多行 <code>code</code> 同时为 <code>NULL</code> 是被允许的<sup><a href="#c8">8</a></sup>。但我们给 <code>code</code> 同时加了 <code>NOT NULL</code>，根本不允许 NULL，这个坑就自动避开了。
+</div>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .4rem">PRIMARY KEY：行的唯一身份</h3>
+<p>
+  官方明确：<code>PRIMARY KEY</code> 在语义上<strong>等价于 <code>UNIQUE</code> + <code>NOT NULL</code></strong>，并且会自动建唯一索引、自动把列标为 <code>NOT NULL</code>；<strong>一张表至多只能有一个主键</strong><sup><a href="#c8">8</a></sup>。
+  它的特殊地位在于：当别的表用外键引用本表时，<strong>默认就指向主键</strong>。我们的 <code>id</code> 列正适合当主键。
+</p>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .4rem">把约束加进 links 表</h3>
+<p>现在重建一张「带约束」的 <code>links</code> 表（若已存在旧表，先 <code>DROP TABLE links;</code>）：</p>
+<pre><code>CREATE TABLE links (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  code        text NOT NULL UNIQUE,            -- 短码：非空 + 全表唯一
+  long_url    text NOT NULL,                   -- 目标网址：必须有
+  created_at  timestamptz NOT NULL DEFAULT now() -- 没传就用当前时间
+);</code></pre>
+<p>
+  这里还顺手用了 <code>DEFAULT now()</code>：插入时若不提供 <code>created_at</code>，自动填入当前时间——这样应用代码连时间都不用管了。
+  约束生效后，下面这条会被数据库<strong>当场拒绝</strong>（因为 <code>abc123</code> 已存在）：
+</p>
+<pre><code>INSERT INTO links (code, long_url) VALUES ('abc123', 'https://dup.example');
+-- ERROR: duplicate key value violates unique constraint "links_code_key"</code></pre>
+
+<h3 style="font-size:1.05rem;margin:1.4rem 0 .4rem">外键 REFERENCES：跨表的「必须真实存在」</h3>
+<p>
+  <strong>外键（foreign key）</strong>让一列的值必须在<strong>另一张表</strong>里真实存在，从而把两张表「关联」起来<sup><a href="#c9">9</a></sup>。
+  这是 LinkPulse 下一课（数据建模）的重头戏，这里先建立直觉。设想未来要记录每次点击：
+</p>
+<pre><code>CREATE TABLE clicks (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  link_id   bigint NOT NULL REFERENCES links (id), -- 必须指向某条真实存在的 link
+  clicked_at timestamptz NOT NULL DEFAULT now()
+);</code></pre>
+<p>
+  <code>link_id ... REFERENCES links (id)</code> 表示：每条点击记录的 <code>link_id</code>，<strong>必须等于 <code>links</code> 表里某一行的 <code>id</code></strong>。
+  如果你想插入一条 <code>link_id = 999</code> 但 <code>links</code> 里没有 id=999，数据库会<strong>拒绝</strong>——这保证了数据的<strong>引用完整性（referential integrity）</strong>：不会出现「点击记录指向一个根本不存在的短链」这种脏数据。
+  （外键被引用列必须是主键或唯一约束<sup><a href="#c9">9</a></sup>，所以 <code>links.id</code> 作为主键正好满足。）
+</p>
+
+<h2><span class="n">6</span>索引（Index）初步：让查询飞起来</h2>
+<p>
+  随着 LinkPulse 上线，<code>links</code> 表可能有几百万行。每次重定向都要 <code>WHERE code = '...'</code> 找一行——如果数据库<strong>逐行扫描</strong>（sequential scan，从第 1 行翻到第 N 行）整张表，会越来越慢。<strong>索引</strong>就是为此而生。
+</p>
+<p>
+  官方用了一个绝妙的类比：索引就像<strong>书末的术语索引</strong><sup><a href="#c10">10</a></sup>——你想查某个词，不必从头读到尾整本书，翻到索引页就能直接跳到对应页码。
+  数据库索引同理：没有索引，系统得<strong>逐行扫全表</strong>找匹配；有了索引，它「只需在搜索树里往下走几层」就能定位到目标行<sup><a href="#c10">10</a></sup>。
+</p>
+<p>建索引的语法很简单<sup><a href="#c10">10</a></sup>。给最常用作查询条件的 <code>code</code> 建一个：</p>
+<pre><code>CREATE INDEX links_code_idx ON links (code);</code></pre>
+<div class="note">
+  <strong>其实你已经有了。</strong> 上一节给 <code>code</code> 加 <code>UNIQUE</code> 时，PostgreSQL 已<strong>自动</strong>为它建了一个唯一索引<sup><a href="#c8">8</a></sup>，主键 <code>id</code> 也是。所以按 <code>code</code> 或 <code>id</code> 查已经是「走索引」的快路。
+  上面这条 <code>CREATE INDEX</code> 是演示给「<strong>非唯一</strong>但常用来过滤」的列加索引时怎么写——比如将来按 <code>clicks.link_id</code> 统计点击数。
+</div>
+<div class="rw">🌍 <b>实战：索引加速读，但拖慢写——别给每列都加。</b>
+  索引不是免费的。官方明确指出：索引创建后，系统必须<strong>始终与表保持同步</strong>，这会给<strong>数据修改操作（INSERT/UPDATE/DELETE）带来额外开销</strong>；很少或从不被查询用到的索引应当删除<sup><a href="#c10">10</a></sup>。
+  道理是：每次写入，所有相关索引都要跟着更新。所以经验法则是——<strong>给「经常出现在 <code>WHERE</code> / <code>ORDER BY</code> / 外键」的列加索引；对写多读少、几乎不拿来查的列别乱加</strong>。LinkPulse 的 <code>code</code>（重定向高频查）值得加；而像点击日志这种「写爆但很少单条查」的表，索引要更克制。
+</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">约束 · UNIQUE</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">LinkPulse 想保证短码 <code>code</code> 在 <code>links</code> 表中<strong>绝不重复</strong>，并且在<strong>高并发</strong>下也不会两个请求插入同一个 code。最稳妥的做法是？</p>
+  <button class="opt" data-correct="true" data-ex="正解。把唯一性交给数据库的 UNIQUE 约束强制执行：直接 INSERT，撞了就由数据库抛唯一性冲突错误，应用捕获后换码重试。这避免了「先查再插」在并发下的竞态条件，UNIQUE 还会自动建索引顺带加速按 code 查询。">给 <code>code</code> 加 <code>UNIQUE</code> 约束，直接 INSERT，冲突时捕获错误重试</button>
+  <button class="opt" data-correct="false" data-ex="这正是竞态条件的来源：两个请求可能同一瞬间都 SELECT 到「不存在」，于是双双 INSERT 同一个 code。应用层「先查再插」在并发下不可靠。">每次插入前先 <code>SELECT</code> 查 code 是否存在，不存在再 <code>INSERT</code></button>
+  <button class="opt" data-correct="false" data-ex="NOT NULL 只保证「有值」，不保证「不重复」。两行都填 'abc123' 完全合法，挡不住重复。">给 <code>code</code> 加 <code>NOT NULL</code> 约束就够了</button>
+  <button class="opt" data-correct="false" data-ex="索引能加速按 code 查询，但单纯的（非唯一）索引并不强制唯一，仍可插入重复值。要强制唯一得用 UNIQUE 约束（它恰好也会建唯一索引）。">只给 <code>code</code> 建一个普通索引来防止重复</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：在 Postgres 里把 links 表的 CRUD 跑一遍</h3>
+  <ol>
+    <li>用 <code>psql</code> 连进上一课的数据库（如 <code>psql linkpulse</code>）。</li>
+    <li><strong>建表</strong>：执行第 5 节那条带约束的 <code>CREATE TABLE links (...)</code>（含 <code>id</code> 主键、<code>code</code> 的 <code>NOT NULL UNIQUE</code>、<code>long_url</code> 的 <code>NOT NULL</code>、<code>created_at</code> 的 <code>DEFAULT now()</code>）。用 <code>\d links</code> 确认结构。</li>
+    <li><strong>增</strong>：用一条多行 <code>INSERT</code> 插入至少 3 条短链（显式写列名，不写 <code>id</code> 和 <code>created_at</code>，让它们自动生成）。</li>
+    <li><strong>查</strong>：① <code>SELECT * FROM links;</code> 看全部；② 用 <code>WHERE code = '...'</code> 精确查一条；③ 用 <code>ORDER BY created_at DESC LIMIT 2;</code> 取最近 2 条。</li>
+    <li><strong>验证 UNIQUE</strong>：故意再插一条<strong>已存在的 code</strong>，确认数据库抛出 <code>duplicate key ... unique constraint</code> 错误。</li>
+    <li><strong>改</strong>：用 <code>UPDATE ... SET long_url = '...' WHERE code = '...'</code> 改掉某条的目标网址；改前先用同样的 <code>WHERE</code> 跑一次 <code>SELECT</code> 确认命中行。</li>
+    <li><strong>删</strong>：用 <code>DELETE FROM links WHERE code = '...'</code> 删掉一条，再 <code>SELECT</code> 确认它没了。</li>
+    <li>（进阶）执行 <code>CREATE INDEX links_code_idx ON links (code);</code>——观察它会不会因为 UNIQUE 已建索引而提示已存在/重复，思考为什么。</li>
+  </ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://www.postgresql.org/docs/current/tutorial-sql.html" target="_blank" rel="noopener">PostgreSQL 官方教程 · 第 2 章 The SQL Language</a>（建表、INSERT、查询）与 <a href="https://www.postgresql.org/docs/current/ddl.html" target="_blank" rel="noopener">第 5 章 Data Definition</a>（约束）。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> ① 你最终的 <code>CREATE TABLE links</code> 语句；② <code>SELECT * FROM links;</code> 的输出（哪怕截图里几行也行）；③ 那条故意触发 <code>UNIQUE</code> 冲突的报错原文。
+  <br><strong>下一课预告：</strong> <em>Lesson 0013 · 数据建模</em>——我们会从「能用」升级到「设计得好」：一对多关系（一条 link 对多次 click）、外键怎么落地、字段该用什么类型、要不要软删除，把 LinkPulse 的表结构正式定下来。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://www.postgresql.org/docs/current/tutorial-sql.html" target="_blank" rel="noopener">PostgreSQL Docs · Chapter 2: The SQL Language</a>（SQL 是与关系型数据库交互的标准语言）</li>
+    <li id="c2"><a href="https://www.postgresql.org/docs/current/tutorial-concepts.html" target="_blank" rel="noopener">PostgreSQL Docs · 2.3 Concepts</a>（表由行组成，每行有固定的列）</li>
+    <li id="c3"><a href="https://www.postgresql.org/docs/current/datatype-datetime.html" target="_blank" rel="noopener">PostgreSQL Docs · 8.5 Date/Time Types</a>（<code>timestamptz</code> 是 <code>timestamp with time zone</code> 的简写）</li>
+    <li id="c4"><a href="https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-SERIAL" target="_blank" rel="noopener">PostgreSQL Docs · 8.1.4 Serial Types</a>（serial 非真实类型，背后是序列 + nextval 默认值）</li>
+    <li id="c5"><a href="https://www.postgresql.org/docs/current/ddl-identity-columns.html" target="_blank" rel="noopener">PostgreSQL Docs · 5.3 Identity Columns</a>（GENERATED ... AS IDENTITY；identity 列自动 NOT NULL）</li>
+    <li id="c6"><a href="https://www.postgresql.org/docs/current/dml-insert.html" target="_blank" rel="noopener">PostgreSQL Docs · 6.1 Inserting Data</a>（显式列名为好习惯；多行 VALUES 写法）</li>
+    <li id="c7"><a href="https://www.postgresql.org/docs/current/tutorial-select.html" target="_blank" rel="noopener">PostgreSQL Docs · 2.5 Querying a Table</a>（SELECT / WHERE / ORDER BY 示例）</li>
+    <li id="c8"><a href="https://www.postgresql.org/docs/current/ddl-constraints.html" target="_blank" rel="noopener">PostgreSQL Docs · 5.4 Constraints</a>（NOT NULL / UNIQUE / PRIMARY KEY；UNIQUE 自动建 B-tree 索引、NULL 默认不相等；主键 = UNIQUE+NOT NULL）</li>
+    <li id="c9"><a href="https://www.postgresql.org/docs/current/tutorial-fk.html" target="_blank" rel="noopener">PostgreSQL Docs · 3.3 Foreign Keys</a>（REFERENCES 保证引用完整性；被引用列须为主键/唯一约束）</li>
+    <li id="c10"><a href="https://www.postgresql.org/docs/current/indexes-intro.html" target="_blank" rel="noopener">PostgreSQL Docs · 11.1 Introduction to Indexes</a>（索引加速查询的类比与原理；CREATE INDEX 语法；索引给数据修改带来开销）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0012 · 上一课 <a href="0011-database-intro-postgres.html">数据库入门与 PostgreSQL</a> · 下一课（预告）：<em>数据建模</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

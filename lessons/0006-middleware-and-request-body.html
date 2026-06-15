@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0006 · 中间件与处理 POST 请求体</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+  .pipeline{display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; justify-content:center; margin:1.3rem 0; font-size:.8rem}
+  .pipeline .box{background:#fbf7ee; border:1px solid var(--accent); border-radius:6px; padding:.45rem .65rem; font-family:"SF Mono",Menlo,Consolas,monospace; text-align:center}
+  .pipeline .ep{background:#1a1a17; color:#f0eecf; border-color:#1a1a17}
+  .pipeline .arr{color:var(--accent); font-weight:700; font-size:1.1em}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="index.html">← 课程目录</a>
+  <span>Lesson 0006 / 阶段 2</span>
+</nav>
+
+<div class="kicker">Lesson 0006 · Node.js 后端之路</div>
+<h1>中间件，与处理 POST 请求体<br>（让你的 API 能「收数据」）</h1>
+
+<div class="mission">
+  <b>从「只读」到「能写」。</b> 到目前为止，你的路由全是 <code>GET</code>——只往外<strong>读</strong>数据。
+  但 LinkPulse 要能<strong>创建短链</strong>：用户提交一个长网址，你存下来并返回短码。这就需要<strong>接收客户端发来的数据（请求体）</strong>。
+  而要把「解析数据」「记日志」这类活儿做得优雅可复用，靠的就是 Express 的灵魂——<strong>中间件</strong>。
+</div>
+
+<h2><span class="n">1</span>什么是中间件（Middleware）</h2>
+<p>
+  官方定义：<strong>中间件就是能访问请求对象 <code>req</code>、响应对象 <code>res</code>、以及「下一个中间件」<code>next</code> 的函数</strong><sup><a href="#c1">1</a></sup>。
+</p>
+<p>
+  最好的心智模型是<strong>流水线 / 安检关卡</strong>：每个请求进来后，<strong>依次穿过</strong>一道道中间件，每一道都可以——检查/加工 <code>req</code>、提前响应、或者<strong>放行（调用 <code>next()</code>）</strong>交给下一道：
+</p>
+<div class="pipeline">
+  <span class="box ep">请求</span><span class="arr">→</span>
+  <span class="box">日志中间件</span><span class="arr">→</span>
+  <span class="box">express.json()</span><span class="arr">→</span>
+  <span class="box">路由处理</span><span class="arr">→</span>
+  <span class="box ep">响应</span>
+</div>
+<p>一个最简单的<strong>自定义中间件</strong>（每个请求都先打一行日志）：</p>
+<pre><code>app.use((req, res, next) =&gt; {
+  console.log(`${req.method} ${req.url}`)
+  next()        // 放行：交给下一道中间件 / 路由
+})</code></pre>
+<p>中间件能做四件事<sup><a href="#c1">1</a></sup>：执行任意代码、修改 <code>req</code>/<code>res</code>、结束请求（发响应）、或调用 <code>next()</code> 放行。</p>
+<div class="rw">
+  ⚠️ <b>最关键的一条规则：</b>如果一个中间件<strong>既不结束请求（不发响应）、又不调用 <code>next()</code></strong>，那么——官方原话——<em>“the request will be left hanging”</em>（请求会一直挂起，客户端永远转圈）<sup><a href="#c1">1</a></sup>。这是新手最常见的「接口卡住不返回」的元凶。
+</div>
+<p class="note">
+  💡 其实你早就用过中间件了：<code>app.get('/x', (req, res) =&gt; {...})</code> 里的处理函数，本身就是「绑定到某个路径的中间件」。所谓「路由」和「中间件」在 Express 里是同一套东西。
+</p>
+
+<h2><span class="n">2</span>顺序很重要</h2>
+<p>
+  中间件<strong>按你定义的先后顺序执行</strong><sup><a href="#c1">1</a></sup>。一旦某个中间件发了响应、又没调用 <code>next()</code>，后面的就不会再执行。所以摆放顺序有讲究：
+</p>
+<ul>
+  <li><strong>日志、解析 body</strong> 这类「预处理」→ 放在<strong>所有路由之前</strong>（请求得先被它们加工过）。</li>
+  <li><strong>404 兜底</strong> → 放在<strong>所有路由之后</strong>（前面都没匹配上，才轮到它）。</li>
+</ul>
+<div class="rw">
+  🌍 <b>原来如此：</b>你在 0005 把 <code>app.use(404)</code> 放在最后，正是这个原理——它是「兜底中间件」，必须排在所有正常路由后面，否则会把正常请求也拦成 404。你当时凭直觉放对了，现在知道为什么了。
+</div>
+
+<h2><span class="n">3</span><code>express.json()</code>：接收 POST 请求体</h2>
+<p>
+  当客户端 <code>POST</code> 一段 JSON 数据时，它在底层是一串<strong>原始字节流</strong>，Express 默认<strong>不会</strong>替你解析。你需要一个内置中间件 <code>express.json()</code> 来解析它，解析结果会被放进 <code>req.body</code><sup><a href="#c2">2</a></sup>：
+</p>
+<pre><code>app.use(express.json())   // 放在路由之前！解析 JSON 体 → 填进 req.body</code></pre>
+<p>加了它之后，POST 路由里就能直接读 <code>req.body</code> 了。至此，「从请求里取数据」的三兄弟你就集齐了：</p>
+<div class="cmp">
+  <div>
+    <h4>三者别搞混</h4>
+<pre><code>req.params  // 路径里：/links/:code
+req.query   // ? 后面：?page=2
+req.body    // 请求体里：POST 的 JSON
+            // （需 express.json() 解析）</code></pre>
+  </div>
+  <div>
+    <h4>各自的来源</h4>
+<pre><code>GET /links/abc?page=2
+         └─┬─┘ └─┬──┘
+        params  query
+
+POST /api/links
+{ "url": "..." }   ← body</code></pre>
+  </div>
+</div>
+
+<h2><span class="n">4</span>写一个 POST 路由：创建短链的雏形</h2>
+<p>现在可以写 LinkPulse 的第一个「写」接口了——接收一个长网址，返回一个（暂时假的）短码：</p>
+<pre><code>app.post('/api/links', (req, res) =&gt; {
+  const { url } = req.body                      // 从请求体取数据
+  if (!url) {
+    return res.status(400).json({ error: 'url is required' })   // 校验：没给 url → 400
+  }
+  const code = Math.random().toString(36).slice(2, 8)   // 临时假短码，以后用数据库生成
+  res.status(201).json({ code, url })           // 201 = 已创建
+})</code></pre>
+<div class="rw">
+  🌍 <b>两个实战状态码：</b><code>201 Created</code> 表示「成功创建了一个新资源」（比笼统的 200 更准确）；<code>400 Bad Request</code> 表示「你传的数据有问题」。真实 API 会认真区分这些状态码——这是专业和业余的分水岭。
+</div>
+
+<h2><span class="n">5</span>把它们拼起来（注意顺序）</h2>
+<pre><code>import express from 'express'
+const app = express()
+
+app.use((req, res, next) =&gt; {          // ① 日志（每个请求）
+  console.log(`${req.method} ${req.url}`)
+  next()
+})
+app.use(express.json())                 // ② 解析 JSON body
+
+app.get('/api/health', (req, res) =&gt; {  // ③ 路由们
+  res.json({ status: 'ok' })
+})
+app.post('/api/links', (req, res) =&gt; {
+  const { url } = req.body
+  if (!url) return res.status(400).json({ error: 'url is required' })
+  const code = Math.random().toString(36).slice(2, 8)
+  res.status(201).json({ code, url })
+})
+
+app.use((req, res) =&gt; {                 // ④ 404 兜底（最后）
+  res.status(404).send('Not Found')
+})
+
+app.listen(3000, () =&gt; console.log('http://localhost:3000'))</code></pre>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">中间件</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">一个中间件里，如果你<strong>既不发送响应、也不调用 <code>next()</code></strong>，会发生什么？</p>
+  <button class="opt" data-correct="true"  data-ex="对！请求会一直挂起，客户端永远转圈——官方原话『the request will be left hanging』。这是接口『卡住不返回』的头号原因。">请求会一直挂起，客户端一直等下去</button>
+  <button class="opt" data-correct="false" data-ex="不对。Express 不会自动跳过——必须你显式调用 next() 才会把控制权交给下一个。">Express 自动跳到下一个中间件</button>
+  <button class="opt" data-correct="false" data-ex="不对，不会崩溃报错；它只是静静地卡住，反而更难排查。">服务器立刻崩溃并打印错误</button>
+  <button class="opt" data-correct="false" data-ex="不对。404 兜底也是个中间件，前面卡住了根本走不到它。">自动返回 404 Not Found</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+  <h3>⌨️ 动手：给 API 加上「记日志」和「收数据」（15 分钟）</h3>
+  <ol>
+    <li>在 <code>express-server.js</code> 里，<strong>所有路由之前</strong>加两个中间件：① 自定义日志中间件（打印 <code>method</code> + <code>url</code>，记得 <code>next()</code>）；② <code>app.use(express.json())</code>。</li>
+    <li>加一个 POST 路由 <code>/api/links</code>，照 §4 写（取 <code>req.body.url</code>、没传就 400、否则返回 201 + 假短码）。</li>
+    <li>重启服务器，用 curl 发一个带 JSON 体的 POST：
+<pre><code>curl -i -X POST http://localhost:3000/api/links \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com"}'</code></pre>
+      应看到 <code>201</code> 和返回的 <code>{ code, url }</code>。同时看服务器终端，日志中间件应打印了这次请求。</li>
+    <li><strong>故意踩个坑（很重要）：</strong>再发一次，但<strong>去掉</strong> <code>-H "Content-Type: application/json"</code>。观察 <code>req.body</code> 变空、于是返回 400 —— 体会「<code>express.json()</code> 只解析声明了 JSON 类型的请求体」这个真实坑。</li>
+  </ol>
+</div>
+
+<div class="src">
+  📖 <strong>本课首选精读源</strong>：
+  <a href="https://expressjs.com/en/guide/using-middleware.html" target="_blank" rel="noopener">Express 官方 — Using middleware</a>
+  （中间件、<code>next()</code>、执行顺序）；<code>req.body</code> 见
+  <a href="https://expressjs.com/en/api.html#express.json" target="_blank" rel="noopener">express.json()</a>。
+</div>
+
+<div class="ask">
+  👩‍🏫 <b>跑通后发我：</b>① POST <code>/api/links</code> 成功返回的 <code>201</code> 响应；② 去掉 Content-Type 后返回的 400；③ 服务器终端里日志中间件打印的内容。
+  有报错直接贴。<br>
+  <strong>下一课预告（0007）：</strong>你这个 POST 现在<strong>盲目相信</strong> <code>req.body</code>（用户传个 <code>{ "url": 123 }</code> 或乱七八糟的也照收）。下节学<strong>输入校验与错误处理</strong>——别信用户输入，这是后端安全的第一课。
+</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://expressjs.com/en/guide/using-middleware.html" target="_blank" rel="noopener">Express 官方 — Using middleware</a>（中间件定义、(req,res,next)、next() 必要性、执行顺序）</li>
+    <li id="c2"><a href="https://expressjs.com/en/api.html#express.json" target="_blank" rel="noopener">Express 官方 — express.json()</a>（解析 JSON 请求体 → req.body）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0006 · 上一课 <a href="0005-express-rewrite.html">0005 — 用 Express 重写服务器</a> · 下一课（预告）：<em>0007 — 输入校验与错误处理</em></p>
+</footer>
+
+<script src="lesson.js"></script>
+
+</body>
+</html>

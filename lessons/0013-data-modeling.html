@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0013 · 数据建模：为 LinkPulse 设计表结构</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属可视化：ER 关系图 + 字段表，仅本章使用 */
+.erd{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-start;margin:1.1rem 0}
+.erd-box{flex:1;min-width:220px;border:1px solid #d4d9e0;border-radius:10px;overflow:hidden;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.erd-box h4{margin:0;padding:.5rem .75rem;background:#1f2a44;color:#fff;font-size:.92rem;letter-spacing:.02em;font-family:ui-monospace,Menlo,Consolas,monospace}
+.erd-box table{width:100%;border-collapse:collapse;font-size:.82rem}
+.erd-box td{padding:.32rem .7rem;border-top:1px solid #eef0f3;font-family:ui-monospace,Menlo,Consolas,monospace}
+.erd-box td:first-child{font-weight:600;color:#243b53}
+.erd-box td:last-child{color:#627d98;text-align:right}
+.erd-box .pk{color:#b44d12}
+.erd-box .fk{color:#2563a6}
+.erd-rel{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:70px;color:#486581;font-size:.78rem;text-align:center;padding-top:1.2rem}
+.erd-rel .card{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:700;color:#1f2a44;font-size:1rem;letter-spacing:.05em}
+.erd-rel .arrow{font-size:1.4rem;line-height:1;color:#9fb3c8}
+.ftab{width:100%;border-collapse:collapse;font-size:.84rem;margin:.8rem 0}
+.ftab th,.ftab td{border:1px solid #dde2e8;padding:.42rem .6rem;text-align:left;vertical-align:top}
+.ftab th{background:#eef2f7;font-weight:600;color:#243b53}
+.ftab td:first-child{font-family:ui-monospace,Menlo,Consolas,monospace;color:#243b53;white-space:nowrap}
+.ftab code{background:#eef2f7;padding:.05rem .3rem;border-radius:4px}
+.legend{font-size:.78rem;color:#627d98;margin:.2rem 0 0}
+.legend b.pk{color:#b44d12}.legend b.fk{color:#2563a6}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0013 / 阶段 3</span></nav>
+<div class="kicker">Lesson 0013 · Node.js 后端之路</div>
+<h1>数据建模：为 LinkPulse 设计表结构</h1>
+
+<div class="mission">
+<b>为什么学这个？</b> 上一课你学会了用 SQL 对单张表做增删改查。但真实的 LinkPulse 不只有一张表——它有<strong>用户</strong>、有用户创建的<strong>短链</strong>、还有每条短链被点击的<strong>访问记录</strong>，三者环环相扣。本章不写多少代码，而是做一件后端工程师上线前必做、且最容易被新手跳过的事：<strong>数据建模（data modeling）</strong>。我们会用「实体—关系」的思维，把 LinkPulse 拆成 <code>users</code> / <code>links</code> / <code>clicks</code> 三张表，定义清楚每个字段的类型、主键、外键和它们之间的关系。这份设计就是下一课用 Prisma 落地的「蓝图」——蓝图错了，后面写再多代码都是返工。
+</div>
+
+<h2><span class="n">1</span>数据建模是什么？为什么先建模再写代码</h2>
+
+<p><b>数据建模（data modeling）</b>，就是在动手写表、写代码之前，先想清楚：我的系统里到底有哪些「东西」（实体），每个东西要记录哪些信息（字段），这些东西之间是什么关系（一个用户能有几条短链？）。然后把这套想法画成图、写成表结构。它是「需求」和「数据库表」之间的一座桥。</p>
+
+<p><b>类比：</b>盖房子。你不会买来砖头就直接砌墙——你会先画<strong>施工图纸</strong>：几个房间、承重墙在哪、水电管线怎么走。数据建模就是数据库的施工图纸。前端同学更熟悉的类比：你在写 React 组件前，往往会先设计 <code>props</code> 和 state 的形状（<code>{ user: {...}, links: [...] }</code>）；数据建模就是把这种「形状设计」做在数据库这一层，而且要考虑得更严谨，因为它要被长期持久化、被很多功能共享。</p>
+
+<p><b>为什么必须「先建模」？</b>这要从前后端一个关键差异说起：</p>
+<ul>
+<li><b>前端代码改起来便宜。</b>一个组件写错了，删掉重写，刷新页面就好，没有「历史包袱」。</li>
+<li><b>数据库的表结构改起来昂贵。</b>一旦上线，表里就装满了<strong>真实用户的真实数据</strong>。这时你想加一列、改一个类型、把一张表拆成两张，都得在「不丢数据、不停服务」的前提下小心翼翼地迁移。字段名起错了、关系设计错了，可能要拖着这个错误跑很久。</li>
+</ul>
+
+<div class="rw">🌍 <b>实战：建模决定后续一切，改表代价大。</b> 这是本章最重要的一句话。后端老手有个共识：<b>代码可以重构，数据模型很难重构</b>。一个真实例子：早期很多产品把「用户名」直接当主键存（<code>username</code> 当 PK，到处用它做外键）。后来要支持「改用户名」功能时才发现——主键被几十张表引用，根本动不了，最后被迫加一列数字 <code>id</code> 做真正的主键、再花几个版本慢慢迁移。<b>建模阶段多花一小时思考，能省下上线后几周的迁移噩梦。</b>这也是为什么我们这一整章都在「想」，下一章才动手「写」。</div>
+
+<div class="note"><b>建模产物长什么样？</b> 通常是两样东西：① 一张 <b>ER 图（实体关系图）</b>，画出有哪些表、表之间怎么连；② 一份<b>字段清单</b>，列出每张表的列名、类型、约束。本章结束时，你会为 LinkPulse 产出这两样东西。</div>
+
+<h2><span class="n">2</span>实体与关系：用 ER 思维拆解 LinkPulse</h2>
+
+<p>建模的核心工具叫 <b>ER 模型（Entity-Relationship Model，实体—关系模型）</b>。它把世界看成两种成分：</p>
+<ul>
+<li><b>实体（Entity）</b>：系统里独立存在的「东西」，通常对应一张<strong>表</strong>。LinkPulse 里的实体：<code>用户</code>、<code>短链</code>、<code>点击记录</code>。</li>
+<li><b>属性（Attribute）</b>：实体身上要记录的信息，对应表里的<strong>列（字段）</strong>。比如「短链」有「目标 URL」「短码」「创建时间」。</li>
+<li><b>关系（Relationship）</b>：实体之间的关联。这是 ER 模型的精华，分三种基数（cardinality）。</li>
+</ul>
+
+<h3 style="margin:.6rem 0 .3rem">三种关系基数</h3>
+<p><b>① 一对一（1—1）</b>：A 的一条最多对应 B 的一条。例如「用户」和「用户的实名认证信息」。LinkPulse 暂时用不到。</p>
+<p><b>② 一对多（1—N）</b>：A 的一条对应 B 的多条，但 B 的一条只属于一个 A。这是最常见的关系。Prisma 官方的定义是：「一对多（1-n）关系把一侧的<strong>一条</strong>记录连接到另一侧的<strong>零条或多条</strong>记录。」<sup><a href="#c3">3</a></sup> 比如「一个用户拥有零到多条短链，而每条短链只属于一个用户」。</p>
+<p><b>③ 多对多（M—N）</b>：双方都能对应对方的多条。Prisma 官方定义：「多对多（m-n）关系把一侧的<strong>零条或多条</strong>记录连接到另一侧的<strong>零条或多条</strong>记录。」<sup><a href="#c3">3</a></sup> 经典例子是「文章」和「标签」：一篇文章可有多个标签，一个标签也可贴到多篇文章上。</p>
+
+<div class="note"><b>怎么判断是 1—N 还是 M—N？</b> 念两句话，<u>两边都念</u>：「一个 ___ 能有几个 ___？」和「一个 ___ 又能属于几个 ___？」。两边都是「多」→ M—N；一边「多」一边「一」→ 1—N。例：「一个用户能有<b>多条</b>短链」+「一条短链只属于<b>一个</b>用户」→ 1—N。</p></div>
+
+<p><b>把 LinkPulse 的关系念一遍：</b></p>
+<div class="erd">
+  <div class="erd-box">
+    <h4>users</h4>
+    <table><tr><td class="pk">id</td><td>用户</td></tr></table>
+  </div>
+  <div class="erd-rel"><span class="card">1 ── N</span><span>拥有</span></div>
+  <div class="erd-box">
+    <h4>links</h4>
+    <table><tr><td class="pk">id</td><td>短链</td></tr></table>
+  </div>
+  <div class="erd-rel"><span class="card">1 ── N</span><span>产生</span></div>
+  <div class="erd-box">
+    <h4>clicks</h4>
+    <table><tr><td class="pk">id</td><td>点击</td></tr></table>
+  </div>
+</div>
+<ul>
+<li>「一个 <b>user</b> 能创建多条 <b>link</b>，一条 link 只属于一个 user」→ <b>user 1—N link</b>。</li>
+<li>「一条 <b>link</b> 能被点击多次（产生多条 <b>click</b>），一条 click 只来自一条 link」→ <b>link 1—N click</b>。</li>
+</ul>
+<p>所以 LinkPulse 是一条「链式 1—N」结构。它<strong>不需要</strong>多对多，建模因此相对干净——这是 SaaS 早期常见的形态。</p>
+
+<div class="rw">🌍 <b>实战：先画 ER 图，再开会，再写代码。</b> 在真实团队里，ER 图是<b>和产品经理对齐需求的语言</b>。当 PM 说「我想看每条短链的访问来源」，工程师立刻在 ER 图上指出：这需要 <code>clicks</code> 表多一个「来源」字段——一张图就避免了「做完才发现没存来源」的悲剧。很多公司用 <a href="https://dbdiagram.io" target="_blank" rel="noopener">dbdiagram.io</a>、<a href="https://www.figma.com" target="_blank" rel="noopener">Figma/FigJam</a> 或直接在 Prisma schema 里画模型来沟通。<b>建模不是一个人闷头做，是团队达成共识的过程。</b></div>
+
+<h2><span class="n">3</span>关系怎么落地：主键、外键与引用完整性</h2>
+
+<p>ER 图上画一条「1—N」的线很容易，但数据库里没有「线」这种东西，只有表和列。这条关系最终要靠两个机制变成真实可用的结构：<b>主键</b>和<b>外键</b>。</p>
+
+<h3 style="margin:.6rem 0 .3rem">主键（Primary Key, PK）</h3>
+<p>PostgreSQL 官方定义：「主键约束（primary key）表示某一列或一组列可以作为表中各行的<strong>唯一标识符</strong>，这要求这些值既<strong>唯一</strong>又<strong>非空（NOT NULL）</strong>。」<sup><a href="#c1">1</a></sup> 一张表<strong>最多只有一个</strong>主键。<sup><a href="#c1">1</a></sup></p>
+<p><b>类比：</b>主键就是每一行的「身份证号」。哪怕两个用户同名同姓，他们的 <code>id</code> 也绝不相同。前端里你给列表渲染时写的 <code>key={item.id}</code>，那个 <code>id</code> 的灵魂就来自数据库主键。</p>
+
+<h3 style="margin:.6rem 0 .3rem">外键（Foreign Key, FK）—— 关系的真身</h3>
+<p>PostgreSQL 官方定义：「外键约束（foreign key）规定某一列（或一组列）的值<strong>必须匹配另一张表某一行中出现的值</strong>。我们说这维护了两张相关表之间的<em>引用完整性（referential integrity）</em>。」<sup><a href="#c1">1</a></sup></p>
+<p>说人话：<b>外键就是「我属于谁」的那一列</b>。在 1—N 关系里，外键<strong>放在「多」的那一侧</strong>。比如 <code>links</code> 表里放一列 <code>user_id</code>，它的值必须是 <code>users</code> 表里真实存在的某个 <code>id</code>。这一列就把「这条短链属于哪个用户」钉死了。</p>
+
+<div class="cmp">
+  <div>
+    <h4>❌ 没有外键概念（前端易犯）</h4>
+<pre><code>// 想「关联」用户和短链，
+// 却把整个用户对象塞进短链里
+{
+  shortCode: "ab12cd",
+  url: "https://...",
+  user: {            // 冗余！
+    name: "Kellen",
+    email: "k@x.com"
+  }
+}
+// 用户改名 → 每条短链里
+// 的副本都得改，必然不一致</code></pre>
+  </div>
+  <div>
+    <h4>✅ 用外键关联（后端正解）</h4>
+<pre><code>// 短链只存「我属于谁」的 id
+links:  { id, short_code, url,
+          user_id: 7 }   // ← FK
+
+users:  { id: 7, name: "Kellen",
+          email: "k@x.com" }
+
+// 用户改名只改 users 一行，
+// 所有短链自动「看到」新名字
+// 因为它们只存了 id，没存副本</code></pre>
+  </div>
+</div>
+
+<p><b>引用完整性（referential integrity）为什么重要？</b> 它是数据库帮你守住的一条铁律：<strong>外键指向的那一行必须真实存在</strong>。如果 <code>links.user_id = 7</code>，数据库就保证 <code>users</code> 里一定有 <code>id=7</code> 这一行——你<strong>无法</strong>插入一条「属于不存在用户」的短链，这种「悬空」的脏数据从源头就被拦住了。</p>
+
+<div class="rw">🌍 <b>实战：删除时连带数据怎么办？（ON DELETE）</b> 如果用户 <code>id=7</code> 注销了，他名下的短链该怎么处理？外键允许你声明<b>删除行为</b>，PostgreSQL 给了几种选项<sup><a href="#c2">2</a></sup>：<br>
+• <code>ON DELETE CASCADE</code>：「当被引用的行被删除时，引用它的行也<b>自动一并删除</b>。」<sup><a href="#c2">2</a></sup> ——删用户，他的短链和点击记录跟着全删（适合「组成部分」关系）。<br>
+• <code>ON DELETE RESTRICT</code>：「<b>阻止</b>删除被引用的行。」<sup><a href="#c2">2</a></sup> ——只要用户还有短链，就不让删这个用户，逼你先处理干净。<br>
+• <code>ON DELETE SET NULL</code>：把引用列「<b>设为 null</b>」。<sup><a href="#c2">2</a></sup> ——短链变成「无主」状态保留下来。<br>
+LinkPulse 里，删用户连带删 links、删 link 连带删 clicks，用 <code>CASCADE</code> 最自然。<b>但请记住：CASCADE 是把双刃剑——它能一键清理，也能因为一次误删而连环删掉海量数据。涉及钱、订单的表通常故意用 RESTRICT，强迫人工确认。</b></div>
+
+<div class="note"><b>用什么类型做主键？</b> 两大流派：① <b>自增整数</b>（PostgreSQL 的 <code>BIGSERIAL</code> / 标准 SQL 的 <code>IDENTITY</code>）——简短、有序、索引快，但会暴露规模（看到 <code>/users/5</code> 就知道你只有几个用户），且不便在多库间合并。② <b>UUID</b>（如 <code>550e8400-...</code>）——全局唯一、不暴露数量、适合分布式，但更长、随机插入对索引略不友好。SaaS 早期用自增整数完全够用，本章 LinkPulse 就用它；等你需要把 id 暴露到 URL 上时，可再考虑 UUID。</div>
+
+<h2><span class="n">4</span>规范化（Normalization）：把冗余和不一致挤出去</h2>
+
+<p>有了实体和关系，下一个问题是：每个字段到底该放在<strong>哪张表</strong>？这正是 <b>规范化（normalization，也叫范式化）</b> 要解决的。微软官方文档给的定义很精准：「规范化是组织数据库中数据的过程，它依照规则创建表、建立表间关系，目的是<strong>消除冗余（redundancy）和不一致依赖（inconsistent dependency）</strong>，从而保护数据并让数据库更灵活。」<sup><a href="#c4">4</a></sup></p>
+
+<p><b>两个要躲的坑：</b></p>
+<ul>
+<li><b>冗余数据（redundant data）</b>：同一份信息存在多个地方。官方原话：「冗余数据浪费磁盘空间并制造维护问题。如果一份数据存在于多处，那么要修改它时，必须在<strong>所有位置以完全相同的方式</strong>修改。」<sup><a href="#c4">4</a></sup>（回想第 3 节那个「把用户名抄进每条短链」的反例——那就是冗余。）</li>
+<li><b>不一致依赖（inconsistent dependency）</b>：把不该放一起的信息硬塞进一张表。官方举例：去 Customers 表查某客户的地址很自然，但去那里查「负责该客户的<strong>员工的薪水</strong>」就不合理——薪水依赖的是<strong>员工</strong>，应该放进 Employees 表。<sup><a href="#c4">4</a></sup></li>
+</ul>
+
+<p>规范化有一套层层递进的规则，每一层叫一个<b>范式（Normal Form）</b>。官方说：「满足前三条规则就称为<strong>第三范式（3NF）</strong>；虽然还有更高的范式，但<strong>对大多数应用，3NF 已是所需的最高级别</strong>。」<sup><a href="#c4">4</a></sup> 所以我们只需要培养到 3NF 的直觉即可，够用。</p>
+
+<table class="ftab">
+<tr><th>范式</th><th>一句话规则（官方表述）</th><th>直觉 / LinkPulse 对照</th></tr>
+<tr><td>1NF<br>第一范式</td><td>消除「重复组」，每列只放<strong>单个原子值</strong>；用主键标识每行。<sup><a href="#c4">4</a></sup></td><td>别在 <code>links</code> 里搞 <code>tag1, tag2, tag3</code> 这种列；一格里也别塞 <code>"a.com,b.com"</code>。</td></tr>
+<tr><td>2NF<br>第二范式</td><td>把「适用于多条记录的值集合」拆成单独的表，用外键关联；记录不应依赖主键之外的东西。<sup><a href="#c4">4</a></sup></td><td>用户的 email、name 属于用户，不该在每条 <code>click</code> 里重复抄一遍——把它们留在 <code>users</code> 表，靠 <code>user_id</code> 关联。</td></tr>
+<tr><td>3NF<br>第三范式</td><td>「消除<strong>不依赖于主键</strong>的字段。」<sup><a href="#c4">4</a></sup> 非键字段必须直接依赖主键，不能依赖另一个非键字段（传递依赖）。</td><td>在 <code>links</code> 表里别存「该短链所属用户的注册邮箱」——邮箱依赖的是 <code>user_id</code>（非键），不是 link 的主键，应留在 <code>users</code>。</td></tr>
+</table>
+
+<p><b>3NF 的核心直觉，记一句话就够：</b>表里每一个非主键字段，都应该「只描述这一行的主键所代表的那个东西」，不多也不少。微软文档把传递依赖讲得很形象：在一张 Students 表里同时塞「导师 Advisor」和「导师办公室 Adv-Room」，问题在于办公室其实<strong>依赖导师、而非学生</strong>，所以应把导师及其办公室拆到 Faculty 表去。<sup><a href="#c4">4</a></sup></p>
+
+<div class="rw">🌍 <b>实战：规范化 vs 适度反规范化（denormalization）。</b> 规范化是默认起点，但<b>不是越纯越好</b>。微软官方专门给了「例外」提醒：「严格遵守 3NF 在理论上可取，但并非总是实际可行……<b>太多小表可能拖慢性能</b>，甚至超出文件/内存上限。」<sup><a href="#c4">4</a></sup> 落到 LinkPulse 一个真实场景：仪表盘要显示「这条短链被点了多少次」。完全规范化的做法是每次都 <code>COUNT(*) FROM clicks WHERE link_id=?</code>——当一条爆款短链有几百万次点击时，每刷一次仪表盘都全表数一遍，很慢。<b>适度反规范化</b>的做法：在 <code>links</code> 表加一列 <code>click_count</code> 缓存这个数字，每次点击时 <code>+1</code>。这是<b>故意制造的冗余</b>——用「写入时多维护一个字段」换「读取时快百倍」。<br><b>权衡的本质：规范化优化「写」与「一致性」，反规范化优化「读」与「速度」。</b> 原则是：<u>先规范化，遇到实测的性能瓶颈再针对性反规范化</u>，并清楚自己在用一致性风险换性能。</div>
+
+<div class="rw">🌍 <b>实战：命名规范，团队的隐形契约。</b> 字段名一旦上线就很难改，所以一开始就要统一。主流后端约定：① 表名用<b>复数小写</b>（<code>users</code>、<code>links</code>），② 列名用 <b>snake_case</b>（<code>created_at</code> 而非 <code>createdAt</code>，因为很多 SQL 数据库对大小写不敏感，下划线更稳），③ 外键统一叫 <code>&lt;单数表名&gt;_id</code>（<code>user_id</code>、<code>link_id</code>），一眼就知道指向谁，④ 时间戳统一 <code>created_at</code> / <code>updated_at</code>，⑤ 布尔字段用 <code>is_</code> 前缀（<code>is_active</code>）。<b>命名一致，半年后接手的人（很可能就是你自己）才读得懂。</b>（下一课 Prisma 里我们会在代码层用 camelCase，再用 <code>@map</code> 映射到数据库的 snake_case 列名，两全其美。）</div>
+
+<h2><span class="n">5</span>什么时候加索引（Index）？</h2>
+
+<p>这是建模时顺带要想、但常被新手忽略的一环。<b>索引（index）</b>是数据库为某一列额外维护的一份「目录」，让按这一列查找时不必扫全表。</p>
+<p><b>类比：</b>一本没有目录的书，要找某一章只能从第一页翻到最后一页（全表扫描，<code>O(n)</code>）；加了目录，翻到目录直接定位页码（索引查找，接近 <code>O(log n)</code>）。代价是：目录本身占纸张（占磁盘），而且书的内容一变（增删改），目录也得跟着更新（写入变慢一点点）。</p>
+
+<p><b>好消息：主键和外键大多自带或强烈建议加索引。</b> PostgreSQL 官方指出，加主键会<strong>自动创建一个唯一 B-tree 索引</strong>。<sup><a href="#c1">1</a></sup> 而外键列虽然<strong>不会</strong>自动建索引，却是最该手动加索引的地方——因为你几乎总会用它来做关联查询（「查这个用户的所有短链」= <code>WHERE user_id = ?</code>）。</p>
+
+<div class="rw">🌍 <b>实战：索引加在「你经常用来查找或关联的列」上。</b> 判断口诀——这一列是否经常出现在 <code>WHERE</code>、<code>JOIN</code>、<code>ORDER BY</code> 里？是 → 考虑加索引。落到 LinkPulse：<br>
+• <code>links.short_code</code>：每次有人访问短链，都要 <code>WHERE short_code = 'ab12cd'</code> 查目标 URL，<b>这是系统最高频的查询，必须加索引</b>（而且它天然唯一，用 <b>唯一索引/UNIQUE 约束</b>，顺便保证不会撞码）。<br>
+• <code>links.user_id</code>、<code>clicks.link_id</code>：外键，频繁用于「查某用户的短链 / 某短链的点击」，加索引。<br>
+• <code>clicks.created_at</code>：仪表盘常按时间范围统计，可加索引。<br>
+<b>反过来——别给每一列都加索引。</b> 索引让<u>读变快但写变慢、占更多空间</u>。一张写入极频繁的 <code>clicks</code> 表如果加满索引，每次插入点击都要更新一堆索引，反而拖累。<b>加索引的本质，是用「写慢一点、占空间」换「特定查询快很多」——只为真实高频的查询付这个代价。</b></div>
+
+<div class="note"><b>本章只需建立「该加索引的直觉」</b>，具体的 <code>CREATE INDEX</code> 语法和性能调优会在后续讲查询优化时深入。现在你只要在设计表时，能指出「哪几列将来要加索引」即可。</div>
+
+<h2><span class="n">6</span>迁移（Migration）：表结构也会演进，且必须可追踪</h2>
+
+<p>最后一个关键概念。你可能想：「既然建模这么重要，我一次设计到位不就行了？」——现实是<strong>不可能</strong>。需求会变：明天 LinkPulse 要加「付费订阅」，<code>users</code> 表就得加 <code>plan</code> 列；后天要支持「短链有效期」，<code>links</code> 就得加 <code>expires_at</code>。<b>表结构（schema）会随产品不断演进。</b></p>
+
+<p><b>迁移（migration）</b>，就是「对数据库结构做的一次<strong>有记录、可重放、可回溯</strong>的变更」。每一次「加一列、改类型、建一张新表」，都被写成一个带版本号的迁移文件，按顺序保存在代码仓库里。</p>
+
+<p><b>类比：迁移之于数据库，就像 Git 提交之于代码。</b> 你不会直接去线上服务器上手改代码——你写代码、<code>git commit</code>、可追溯、可在每台机器重放、出错能回滚。数据库结构同理：你不该登上生产库手敲 <code>ALTER TABLE</code>（改完没人知道改了啥、本地和线上还对不上），而是写一个迁移文件，让它在本地、测试、生产环境<strong>按同一顺序、同一套变更</strong>跑一遍。</p>
+
+<table class="ftab">
+<tr><th>没有迁移（手改）</th><th>有迁移（工程化）</th></tr>
+<tr><td>直接在数据库敲 <code>ALTER TABLE</code>，改完无记录</td><td>每次变更生成一个版本化文件，进 Git 仓库</td></tr>
+<tr><td>本地、线上结构悄悄不一致，「在我机器上是好的」</td><td>所有环境按同一串迁移重放，结构必然一致</td></tr>
+<tr><td>新同事拉下代码，建不出和你一样的库</td><td>新人跑一条命令，迁移自动建出完整最新结构</td></tr>
+<tr><td>改错了只能凭记忆手动改回去</td><td>有清晰的变更历史，能定位、能回滚</td></tr>
+</table>
+
+<div class="rw">🌍 <b>实战：永远不要手改生产数据库结构。</b> 这是后端铁律。真实事故模式：开发在本地 <code>ALTER TABLE</code> 加了列、功能跑通就上线了，但忘了在生产库执行同样的变更——结果新代码一上线就报「column does not exist」，全站 500。迁移机制就是为了根除这类「环境漂移（schema drift）」。<b>下一课的 Prisma 自带强大的迁移系统</b>（<code>prisma migrate</code>）：你只改 <code>schema.prisma</code> 这份「单一事实来源」，它自动生成 SQL 迁移文件并应用——你这一章设计的三张表，正是要喂给它的输入。所以现在把模型想清楚，下一课会异常顺滑。</div>
+
+<h2><span class="n">7</span>把它落地：LinkPulse 三张表的完整设计</h2>
+
+<p>理论齐活，现在产出 LinkPulse 的正式数据模型。先看 ER 全景图，再看每张表的字段清单。</p>
+
+<div class="erd">
+  <div class="erd-box">
+    <h4>users</h4>
+    <table>
+      <tr><td class="pk">id</td><td>BIGSERIAL · PK</td></tr>
+      <tr><td>email</td><td>VARCHAR · UNIQUE</td></tr>
+      <tr><td>password_hash</td><td>VARCHAR</td></tr>
+      <tr><td>plan</td><td>VARCHAR</td></tr>
+      <tr><td>created_at</td><td>TIMESTAMPTZ</td></tr>
+    </table>
+  </div>
+  <div class="erd-rel"><span class="arrow">──&lt;</span><span class="card">1 : N</span><span>拥有</span></div>
+  <div class="erd-box">
+    <h4>links</h4>
+    <table>
+      <tr><td class="pk">id</td><td>BIGSERIAL · PK</td></tr>
+      <tr><td class="fk">user_id</td><td>BIGINT · FK→users</td></tr>
+      <tr><td>short_code</td><td>VARCHAR · UNIQUE</td></tr>
+      <tr><td>target_url</td><td>TEXT</td></tr>
+      <tr><td>click_count</td><td>BIGINT</td></tr>
+      <tr><td>created_at</td><td>TIMESTAMPTZ</td></tr>
+    </table>
+  </div>
+  <div class="erd-rel"><span class="arrow">──&lt;</span><span class="card">1 : N</span><span>产生</span></div>
+  <div class="erd-box">
+    <h4>clicks</h4>
+    <table>
+      <tr><td class="pk">id</td><td>BIGSERIAL · PK</td></tr>
+      <tr><td class="fk">link_id</td><td>BIGINT · FK→links</td></tr>
+      <tr><td>clicked_at</td><td>TIMESTAMPTZ</td></tr>
+      <tr><td>ip_address</td><td>INET</td></tr>
+      <tr><td>user_agent</td><td>TEXT</td></tr>
+      <tr><td>referrer</td><td>TEXT</td></tr>
+    </table>
+  </div>
+</div>
+<p class="legend">图例：<b class="pk">橙色 = 主键（PK）</b> · <b class="fk">蓝色 = 外键（FK）</b> · <code>──&lt;</code> 朝向「多」的一侧（鱼尾/crow's foot 记法）。读法：<b>users 1 — N links 1 — N clicks</b>。</p>
+
+<h3 style="margin:1rem 0 .3rem"><code>users</code> —— 用户</h3>
+<table class="ftab">
+<tr><th>字段</th><th>类型</th><th>约束 / 说明</th></tr>
+<tr><td>id</td><td><code>BIGSERIAL</code></td><td><b>主键</b>。自增整数，每个用户的身份证号。</td></tr>
+<tr><td>email</td><td><code>VARCHAR(255)</code></td><td><b>UNIQUE + NOT NULL</b>。登录账号，必须唯一（靠唯一约束兜底，防止两人注册同邮箱）。</td></tr>
+<tr><td>password_hash</td><td><code>VARCHAR(255)</code></td><td>NOT NULL。存的是密码的<b>哈希值</b>，<u>绝不存明文密码</u>（哈希怎么做留待鉴权章节）。</td></tr>
+<tr><td>plan</td><td><code>VARCHAR(20)</code></td><td>订阅档位，如 <code>'free'</code> / <code>'pro'</code>。默认 <code>'free'</code>。SaaS 收费的依据。</td></tr>
+<tr><td>created_at</td><td><code>TIMESTAMPTZ</code></td><td>注册时间，默认 <code>now()</code>。带时区（TZ）更安全。</td></tr>
+</table>
+
+<h3 style="margin:1rem 0 .3rem"><code>links</code> —— 短链（属于某个 user）</h3>
+<table class="ftab">
+<tr><th>字段</th><th>类型</th><th>约束 / 说明</th></tr>
+<tr><td>id</td><td><code>BIGSERIAL</code></td><td><b>主键</b>。</td></tr>
+<tr><td>user_id</td><td><code>BIGINT</code></td><td><b>外键 → users.id</b>，<code>ON DELETE CASCADE</code>。这一列就是「user 1—N link」关系的真身：删用户连带删其短链。<u>建索引</u>。</td></tr>
+<tr><td>short_code</td><td><code>VARCHAR(16)</code></td><td><b>UNIQUE + NOT NULL</b>。短码，如 <code>ab12cd</code>。最高频查询列 → <b>唯一索引</b>（既保证不撞码，又让访问跳转飞快）。</td></tr>
+<tr><td>target_url</td><td><code>TEXT</code></td><td>NOT NULL。原始长链接。用 <code>TEXT</code> 因 URL 可能很长，不必限长。</td></tr>
+<tr><td>click_count</td><td><code>BIGINT</code></td><td>默认 <code>0</code>。<b>适度反规范化</b>的缓存列：点击数。属故意冗余，换仪表盘读取速度（见第 4 节）。</td></tr>
+<tr><td>created_at</td><td><code>TIMESTAMPTZ</code></td><td>创建时间，默认 <code>now()</code>。</td></tr>
+</table>
+
+<h3 style="margin:1rem 0 .3rem"><code>clicks</code> —— 点击记录（属于某条 link）</h3>
+<table class="ftab">
+<tr><th>字段</th><th>类型</th><th>约束 / 说明</th></tr>
+<tr><td>id</td><td><code>BIGSERIAL</code></td><td><b>主键</b>。</td></tr>
+<tr><td>link_id</td><td><code>BIGINT</code></td><td><b>外键 → links.id</b>，<code>ON DELETE CASCADE</code>。「link 1—N click」关系的真身：删短链连带删其点击。<u>建索引</u>。</td></tr>
+<tr><td>clicked_at</td><td><code>TIMESTAMPTZ</code></td><td>点击发生时间，默认 <code>now()</code>。按时间出报表会常用 → 可建索引。</td></tr>
+<tr><td>ip_address</td><td><code>INET</code></td><td>访客 IP。PostgreSQL 有原生 <code>INET</code> 类型，比当字符串存更省、可按网段查询。（注意：IP 属个人数据，留意隐私合规。）</td></tr>
+<tr><td>user_agent</td><td><code>TEXT</code></td><td>浏览器/设备标识，用于分析「来自手机还是桌面」。</td></tr>
+<tr><td>referrer</td><td><code>TEXT</code></td><td>来源页（从哪个网站点进来的），分析流量来源。</td></tr>
+</table>
+
+<div class="note"><b>这份设计满足 3NF 吗？</b> 基本满足：每列都是原子值（1NF）；每张表的非键列都只依赖<u>自己的主键</u>（2NF/3NF）——用户信息只在 <code>users</code>、短链信息只在 <code>links</code>、点击信息只在 <code>clicks</code>，没有把 email 抄进 clicks 这类传递依赖。<b>唯一一处刻意的反规范化是 <code>links.click_count</code></b>——这是清醒的权衡，不是疏忽。这正是「先规范化、按需反规范化」的现实落地。</div>
+
+<p>下面把这份设计写成可执行的 SQL（仅供你直观感受最终形态；<b>下一课我们用 Prisma 来更优雅地表达它并自动生成迁移</b>，不用手写这些）：</p>
+<pre><code>-- LinkPulse 数据模型（PostgreSQL 方言，预览用）
+CREATE TABLE users (
+  id            BIGSERIAL    PRIMARY KEY,
+  email         VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  plan          VARCHAR(20)  NOT NULL DEFAULT 'free',
+  created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE TABLE links (
+  id          BIGSERIAL    PRIMARY KEY,
+  user_id     BIGINT       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  short_code  VARCHAR(16)  NOT NULL UNIQUE,   -- UNIQUE 自带唯一索引
+  target_url  TEXT         NOT NULL,
+  click_count BIGINT       NOT NULL DEFAULT 0, -- 适度反规范化的缓存列
+  created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_links_user_id ON links(user_id);  -- 外键列手动加索引
+
+CREATE TABLE clicks (
+  id         BIGSERIAL   PRIMARY KEY,
+  link_id    BIGINT      NOT NULL REFERENCES links(id) ON DELETE CASCADE,
+  clicked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ip_address INET,
+  user_agent TEXT,
+  referrer   TEXT
+);
+CREATE INDEX idx_clicks_link_id    ON clicks(link_id);
+CREATE INDEX idx_clicks_clicked_at ON clicks(clicked_at);</code></pre>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">实体关系 & 范式</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">在 LinkPulse 里，「一条短链能被点击很多次，而每条点击记录只来自一条短链」。这是什么关系？它在表结构里应该怎么落地？</p>
+  <button class="opt" data-correct="true" data-ex="正确！这是典型的一对多（1—N）：link 是「一」，click 是「多」。落地方式是把外键放在「多」的一侧——即在 clicks 表加一列 link_id 指向 links.id。这正符合 Prisma 与关系数据库的通用做法：1—N 的外键永远在「多」侧。">link 1—N click：在「多」的一侧 clicks 表加外键 link_id</button>
+  <button class="opt" data-correct="false" data-ex="错。这不是多对多。多对多要求「双向都是多」，比如文章与标签。这里 click 一侧是「一条点击只属于一条短链」，明显是「一」，所以是 1—N 而非 M—N，也不需要中间关联表。">link M—N click：需要一张中间关联表</button>
+  <button class="opt" data-correct="false" data-ex="错。把外键放在「一」的一侧（在 links 里存 click_id）是常见误区：一条短链有成千上万次点击，一列 click_id 根本存不下多个值，硬塞还会违反 1NF（一格多值）。外键必须放「多」侧。">link 1—N click：在「一」的一侧 links 表加外键 click_id</button>
+  <button class="opt" data-correct="false" data-ex="错。把点击信息全塞进 links 表（如用 click1_ip、click2_ip… 或一列逗号拼接）正是第一范式（1NF）要消灭的「重复组 / 非原子值」。点击是会无限增长的独立实体，必须单独成表。">不需要 clicks 表，直接在 links 里加若干 click 列存点击信息</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+<h3>⌨️ 动手：写出 LinkPulse 三张表的结构设计</h3>
+<p>本章不写运行代码，产出「设计文档」。在项目根目录新建一个文件 <code>study-node/03-data/schema-design.md</code>（先用 Markdown 表达想法，下一课再用 Prisma 落地），完成：</p>
+<ol>
+<li><b>画 ER 关系</b>：用一行文字或简单 ASCII 写出三张表的关系链，标明基数与外键方向，例如：<code>users (1) ──&lt; (N) links (1) ──&lt; (N) clicks</code>，并各注明「外键在哪一侧、叫什么名字」。</li>
+<li><b>列字段清单</b>：为 <code>users</code> / <code>links</code> / <code>clicks</code> 各做一张表格，列出<b>字段名 + 类型 + 约束</b>（PK / FK / UNIQUE / NOT NULL / DEFAULT）。可直接参考第 7 节，但请用自己的话把「为什么是这个类型/约束」写进备注。</li>
+<li><b>标注主外键与索引</b>：明确每张表的主键；每个外键写清楚指向哪张表的哪一列、用什么 <code>ON DELETE</code> 行为；并标出<b>你打算加索引的列</b>，每个都用一句话说明「因为它会高频出现在 WHERE / JOIN / ORDER BY」。</li>
+<li><b>指出反规范化决策</b>：找出你设计里<b>故意冗余</b>的字段（提示：<code>click_count</code>），写一句话说明你用什么换什么（一致性维护成本 ↔ 读取速度）。</li>
+<li><b>（加分）想一次演进</b>：假设下周要支持「短链有效期」，你会给哪张表加什么字段？这个改动将来需要一次<b>迁移（migration）</b>——用一句话描述为什么不能直接上生产库手敲 <code>ALTER TABLE</code>。</li>
+</ol>
+<p>完成后你手里就有一份能直接投喂给 Prisma 的蓝图了。</p>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://learn.microsoft.com/en-us/troubleshoot/microsoft-365-apps/access/database-normalization-description" target="_blank" rel="noopener">Microsoft Learn — Database normalization description</a>（用一个学生表的例子，把 1NF→2NF→3NF 一步步演示得极清楚，建模入门必读）。搭配 <a href="https://www.postgresql.org/docs/current/ddl-constraints.html" target="_blank" rel="noopener">PostgreSQL 官方文档 · Constraints</a> 理解主键/外键如何落地。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> 你的 <code>schema-design.md</code> 内容（三张表的字段清单 + ER 关系 + 你标注的索引列和那处反规范化决策）。我会帮你 review：字段类型选得合不合理、外键方向对不对、3NF 有没有破绽、索引加得是否到位。<br><strong>下一课预告：</strong> Lesson 0014《Prisma 入门》——我们把这份纸面设计变成真代码：安装 Prisma、把三张表写进类型安全的 <code>schema.prisma</code>、跑第一个 <code>prisma migrate</code> 自动建表，并连上数据库。你这一章的蓝图，正是下一章的起点。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://www.postgresql.org/docs/current/ddl-constraints.html" target="_blank" rel="noopener">PostgreSQL Documentation · 5.5. Constraints</a>（主键「唯一且非空、每表至多一个、自动建唯一 B-tree 索引」；外键「值必须匹配另一表某行、维护引用完整性」的官方定义）。</li>
+    <li id="c2"><a href="https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK" target="_blank" rel="noopener">PostgreSQL Documentation · Foreign Keys（ON DELETE 行为）</a>（CASCADE「自动一并删除引用行」、RESTRICT「阻止删除被引用行」、SET NULL「将引用列设为 null」的官方表述）。</li>
+    <li id="c3"><a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations" target="_blank" rel="noopener">Prisma Documentation · Relations</a>（「关系是两个模型之间的连接」；关系字段不存在于数据库、关系标量字段即数据库中的外键）。配合 <a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/one-to-many-relations" target="_blank" rel="noopener">One-to-many relations</a>（1-n 定义：一侧一条连另一侧零或多条）与 <a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations" target="_blank" rel="noopener">Many-to-many relations</a>（m-n 定义）。</li>
+    <li id="c4"><a href="https://learn.microsoft.com/en-us/troubleshoot/microsoft-365-apps/access/database-normalization-description" target="_blank" rel="noopener">Microsoft Learn · Database normalization description</a>（规范化定义「消除冗余与不一致依赖」；1NF/2NF/3NF 规则原文；3NF 为多数应用所需最高级别；以及过度规范化「太多小表可能拖慢性能」的官方例外提醒）。</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0013 · 上一课 <a href="0012-sql-basics.html">SQL 基础</a> · 下一课（预告）：<em>Prisma 入门：把三张表落地为代码</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

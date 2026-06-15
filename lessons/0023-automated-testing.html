@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0023 · 自动化测试：单元、集成与测试金字塔</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：测试金字塔可视化 */
+.pyramid{display:flex;flex-direction:column;align-items:center;gap:6px;margin:1.2rem 0}
+.pyramid .layer{color:#0b3;font-weight:700;text-align:center;padding:.55rem .8rem;border-radius:8px;color:#1a2b1a}
+.pyramid .e2e{width:34%;background:#ffd9d9;border:1px solid #f1a9a9}
+.pyramid .intg{width:62%;background:#fff0c8;border:1px solid #eccf7a}
+.pyramid .unit{width:90%;background:#d3f3d8;border:1px solid #8fce9c}
+.pyramid small{display:block;font-weight:400;color:#3a4a3a;font-size:.78rem;margin-top:.2rem}
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0023 / 阶段 6</span></nav>
+<div class="kicker">Lesson 0023 · Node.js 后端之路</div>
+<h1>自动化测试：单元、集成与测试金字塔</h1>
+
+<div class="mission"><b>为什么学这个？</b> 你的 LinkPulse 已经能「创建短链 → 存库 → 跳转 → 缓存」，代码越来越多。下一步你要 Docker 化、上 CI、加认证和计费——每改一处都可能悄悄弄坏旧功能。<b>自动化测试就是你重构和加功能时的安全网</b>：一条命令 <code>npm test</code> 就能在几秒内告诉你「哪里坏了」。本章给 LinkPulse 的 <code>LinkService</code> 写单元测试（用 0019 的依赖注入 DI 注入假 repo，不碰数据库），给 <code>POST /api/links</code> 写 supertest 集成测试（真实 HTTP，覆盖 400 与 201）。</div>
+
+<h2><span class="n">1</span>为什么要写测试：从「手动点」到「机器跑」</h2>
+
+<p>作为前端，你大概体验过：改了个组件，本地点几下没问题就提交了，结果上线发现另一个页面崩了。后端的「悄悄弄坏」更隐蔽——一个被多处调用的 <code>service</code> 函数改了返回结构，可能影响三个接口，而你只测了一个。</p>
+
+<p>测试解决的核心痛点有三个：</p>
+<ul>
+<li><b>防回归（regression）</b>：「回归」指<i>本来好的功能，被新改动弄坏了</i>。一套测试在每次改动后自动重跑，坏了立刻红灯。</li>
+<li><b>重构有底气</b>：你敢把一坨乱代码拆开重写，是因为有测试保证「行为没变」。没有测试的重构 = 闭眼开车。</li>
+<li><b>测试即文档</b>：一份好测试用例，读起来就是「这个函数在什么输入下应该返回什么」，比注释更可靠（因为它会被执行验证）。</li>
+</ul>
+
+<div class="note"><b>类比：</b>手动测试像每次出门前挨个检查门窗水电；自动化测试像装了一套传感器，按一下面板就知道全屋状态。前者随项目变大而线性变慢，后者几乎恒定。</div>
+
+<div class="rw">🌍 <b>实战：</b>不要追求「先把功能全做完再补测试」。真实团队里，<b>测试是和代码一起长出来的</b>——你写完 <code>LinkService.createLink</code>，顺手就写它的单测。等功能堆了几千行再补测试，你会发现很多代码<b>根本没法测</b>（耦合太死、依赖到处 new），反过来逼你回去改设计。这也是 0019 强调依赖注入的原因之一。</div>
+
+<h2><span class="n">2</span>测试金字塔：多少单元、多少集成、多少 E2E</h2>
+
+<p><b>测试金字塔（Test Pyramid）</b>是 Mike Cohn 提出、Martin Fowler 在《The Practical Test Pyramid》中系统阐述的策略<sup><a href="#c3">3</a></sup>。它回答一个工程问题：测试有很多种，<b>每种各写多少才划算？</b></p>
+
+<div class="pyramid">
+  <div class="layer e2e">E2E / UI 测试（少量）<small>启动整个系统，模拟真实用户全链路。慢、脆、贵</small></div>
+  <div class="layer intg">集成测试（适量）<small>多个模块一起跑，比如打真实 HTTP 端点、连测试数据库</small></div>
+  <div class="layer unit">单元测试（大量）<small>测单个函数/类的纯逻辑，毫秒级，隔离、稳定、便宜</small></div>
+</div>
+
+<p>越往上：<b>越接近真实用户、越能发现集成问题，但越慢、越脆弱、越难定位</b>。越往下：<b>越快越稳越好定位，但离真实场景越远</b>。Fowler 的核心论断是：<i>「你应该有远多于高层测试的低层单元测试」</i><sup><a href="#c3">3</a></sup>。</p>
+
+<table style="width:100%;border-collapse:collapse;font-size:.88rem;margin:1rem 0">
+<tr style="background:#f0f3f0"><th style="text-align:left;padding:.5rem;border:1px solid #ddd">层级</th><th style="text-align:left;padding:.5rem;border:1px solid #ddd">测什么</th><th style="text-align:left;padding:.5rem;border:1px solid #ddd">LinkPulse 例子</th><th style="text-align:left;padding:.5rem;border:1px solid #ddd">速度</th></tr>
+<tr><td style="padding:.5rem;border:1px solid #ddd">单元</td><td style="padding:.5rem;border:1px solid #ddd">单个函数纯逻辑，依赖全 mock</td><td style="padding:.5rem;border:1px solid #ddd"><code>LinkService.createLink</code> 是否拒绝非法 URL、是否生成短码</td><td style="padding:.5rem;border:1px solid #ddd">~ms</td></tr>
+<tr><td style="padding:.5rem;border:1px solid #ddd">集成</td><td style="padding:.5rem;border:1px solid #ddd">多模块串起来，真路由+真校验</td><td style="padding:.5rem;border:1px solid #ddd">supertest 打 <code>POST /api/links</code>，验 400/201</td><td style="padding:.5rem;border:1px solid #ddd">~10-100ms</td></tr>
+<tr><td style="padding:.5rem;border:1px solid #ddd">E2E</td><td style="padding:.5rem;border:1px solid #ddd">完整系统，真库真 Redis</td><td style="padding:.5rem;border:1px solid #ddd">起服务 → 创建短链 → 真访问 <code>/:code</code> → 验 302</td><td style="padding:.5rem;border:1px solid #ddd">~秒</td></tr>
+</table>
+
+<div class="rw">🌍 <b>实战：</b>金字塔不是教条，是「投资回报」指南。本章给 LinkPulse 写的是<b>金字塔下两层</b>：大量单元测 <code>LinkService</code> 逻辑 + 几个集成测覆盖关键 HTTP 路径。E2E（起真库真 Redis 跑全链路）留到 0024 Docker 化、0025 CI 之后再补，因为那时你有了 <code>docker compose</code> 能一键拉起依赖环境。</div>
+
+<h2><span class="n">3</span>装 Vitest，写第一个单元测试</h2>
+
+<p><b>Vitest</b> 是基于 Vite 的新一代测试框架，原生支持 TypeScript / ESM，开箱即用，API 与 Jest 高度兼容（<code>describe</code> / <code>it</code> / <code>expect</code>）<sup><a href="#c1">1</a></sup>。对我们这种已全面 TS + ESM 的项目，它几乎零配置。</p>
+
+<pre><code>npm i -D vitest supertest @types/supertest</code></pre>
+
+<p>Vitest 默认会读你的 <code>vite.config.*</code>；没有也没关系，单独建一个 <code>vitest.config.ts</code> 即可，它优先级更高<sup><a href="#c2">2</a></sup>：</p>
+
+<pre><code>// vitest.config.ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    globals: false,        // 我们显式 import，不污染全局
+    environment: 'node',   // 后端测试跑在 node 环境
+    include: ['src/**/*.test.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+    },
+  },
+});</code></pre>
+
+<p>在 <code>package.json</code> 配置脚本（<code>vitest run</code> 跑一次后退出，适合 CI；不加 <code>run</code> 是 watch 模式，适合本地开发）<sup><a href="#c1">1</a></sup>：</p>
+
+<pre><code>{
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage"
+  }
+}</code></pre>
+
+<p>先尝个鲜——测一个纯函数。假设 LinkPulse 有个工具校验目标 URL：</p>
+
+<div class="cmp">
+<div><h4>src/utils/url.ts（被测代码）</h4>
+<pre><code>export function isValidHttpUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}</code></pre></div>
+<div><h4>src/utils/url.test.ts（测试）</h4>
+<pre><code>import { describe, it, expect } from 'vitest';
+import { isValidHttpUrl } from './url.js';
+
+describe('isValidHttpUrl', () =&gt; {
+  it('接受 https 链接', () =&gt; {
+    expect(isValidHttpUrl('https://a.com')).toBe(true);
+  });
+  it('拒绝非 http 协议', () =&gt; {
+    expect(isValidHttpUrl('ftp://a.com')).toBe(false);
+  });
+  it('拒绝乱字符串', () =&gt; {
+    expect(isValidHttpUrl('not a url')).toBe(false);
+  });
+});</code></pre></div>
+</div>
+
+<p><code>describe</code> 把相关用例分组；<code>it</code>（等同 <code>test</code>）是一条用例；<code>expect(x).toBe(y)</code> 是断言。跑 <code>npm test</code> 就能看到三条绿勾。</p>
+
+<div class="note"><b>ESM import 路径要带 <code>.js</code>：</b>因为项目是 ESM（NodeNext），编译后引用的是 <code>.js</code> 文件，所以测试里 import 源码也写 <code>./url.js</code>。Vitest 走 Vite 的解析，能正确处理这一点。</div>
+
+<h2><span class="n">4</span>mock 与 stub：让 LinkService 单测不碰数据库</h2>
+
+<p>单元测试要<b>隔离</b>：测 <code>LinkService</code> 的逻辑时，不该真去连 PostgreSQL。这就需要「替身」。两个常被混用但有区别的术语：</p>
+
+<ul>
+<li><b>Stub（桩）</b>：提供<b>预设返回值</b>，让被测代码能跑下去。关注「<i>给出什么</i>」。例：让假 repo 的 <code>findByCode</code> 固定返回 <code>null</code>，模拟「短码没被占用」。</li>
+<li><b>Mock（模拟）</b>：除了能返回值，还<b>记录自己被怎么调用</b>，供你断言。关注「<i>有没有被正确地调用</i>」。例：断言 <code>repo.create</code> 被调用了一次、且参数里的 <code>shortCode</code> 是 6 位。</li>
+</ul>
+
+<p>Vitest 用 <code>vi.fn()</code> 创建 mock 函数（可记录调用、可设返回值），<code>vi.mock()</code> 替换整个模块，<code>vi.spyOn()</code> 监视已有方法<sup><a href="#c4">4</a></sup>。<b>但对我们最优雅的方式是依赖注入</b>——回想 0019：<code>LinkService</code> 通过构造函数接收一个 <code>repository</code>，所以测试时直接<b>注入一个假 repo 对象</b>，连 <code>vi.mock</code> 都不需要。这正是 DI 让代码可测的价值。</p>
+
+<div class="cmp">
+<div><h4>src/links/link.service.ts（回顾 0019 的 DI 结构）</h4>
+<pre><code>import { nanoid } from 'nanoid';
+import { isValidHttpUrl } from '../utils/url.js';
+
+// service 只依赖这个接口，不关心背后是 Prisma 还是别的
+export interface LinkRepository {
+  findByCode(code: string): Promise&lt;{ id: string } | null&gt;;
+  create(data: { shortCode: string; targetUrl: string; userId: string })
+    : Promise&lt;{ id: string; shortCode: string }&gt;;
+}
+
+export class LinkService {
+  constructor(private readonly repo: LinkRepository) {}
+
+  async createLink(targetUrl: string, userId: string) {
+    if (!isValidHttpUrl(targetUrl)) {
+      throw new Error('INVALID_URL');
+    }
+    // 生成短码，极小概率撞码就重试
+    let shortCode = nanoid(6);
+    if (await this.repo.findByCode(shortCode)) {
+      shortCode = nanoid(6);
+    }
+    return this.repo.create({ shortCode, targetUrl, userId });
+  }
+}</code></pre></div>
+<div><h4>src/links/link.service.test.ts（注入 mock repo）</h4>
+<pre><code>import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { LinkService, type LinkRepository } from './link.service.js';
+
+// 用 vi.fn() 造一个全是 mock 方法的假 repo
+function makeRepo(): LinkRepository {
+  return {
+    findByCode: vi.fn().mockResolvedValue(null), // stub：默认没撞码
+    create: vi.fn().mockImplementation(async (d) =&gt; ({
+      id: 'fake-id', shortCode: d.shortCode,
+    })),
+  };
+}
+
+describe('LinkService.createLink', () =&gt; {
+  let repo: LinkRepository;
+  let service: LinkService;
+
+  beforeEach(() =&gt; {
+    repo = makeRepo();
+    service = new LinkService(repo);
+  });
+
+  it('非法 URL 抛 INVALID_URL，且不写库', async () =&gt; {
+    await expect(service.createLink('xxx', 'u1'))
+      .rejects.toThrow('INVALID_URL');
+    expect(repo.create).not.toHaveBeenCalled(); // mock：断言没被调用
+  });
+
+  it('合法 URL 生成 6 位短码并落库', async () =&gt; {
+    const link = await service.createLink('https://a.com', 'u1');
+    expect(link.shortCode).toHaveLength(6);
+    expect(repo.create).toHaveBeenCalledTimes(1); // mock：断言调用次数
+    expect(repo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ targetUrl: 'https://a.com', userId: 'u1' }),
+    );
+  });
+});</code></pre></div>
+</div>
+
+<p>注意这套测试<b>零数据库、零网络、毫秒级完成</b>。<code>findByCode</code> 是 stub（给个固定返回让逻辑往下走），<code>create</code> 既是 stub（返回假对象）又当 mock 用（<code>toHaveBeenCalledWith</code> 断言它被怎么调用）。</p>
+
+<div class="note"><b>记得清理 mock 状态：</b>官方文档强调「务必在每次测试前后清理或还原 mock，否则上一条用例的调用记录会污染下一条」<sup><a href="#c4">4</a></sup>。我们用 <code>beforeEach</code> 每次都重建 repo，自然就隔离了；也可在 config 里设 <code>clearMocks: true</code>。</p></div>
+
+<div class="rw">🌍 <b>实战：DI 让单测不碰真数据库。</b>如果 <code>LinkService</code> 内部直接 <code>import prisma</code> 并调用，你单测时就被迫连库（慢、脏数据、CI 难配）或被迫用 <code>vi.mock('../prisma')</code> 去 hack 模块。0019 把 repo 从构造函数注入，使得测试只要传个普通对象即可——<b>可测性是好架构的副产品，不是负担</b>。这也是为什么「测试驱动」常常反过来改善设计。</div>
+
+<h2><span class="n">5</span>集成测试：用 supertest 打真实 HTTP 端点</h2>
+
+<p>单元测试保证「逻辑对」，但接不接得起来要看集成。<b>supertest</b> 专门测 HTTP 服务：你把 Express <code>app</code> 传给它，它会在临时端口起一个测试服务器并发真实请求，你无需手动管理端口<sup><a href="#c5">5</a></sup>。它覆盖的正是单元测不到的部分：<b>路由是否挂对、zod 校验中间件、错误处理中间件、状态码与响应体格式</b>。</p>
+
+<p>关键前提：<b>导出 <code>app</code> 但不要在同一文件里 <code>app.listen()</code></b>，否则测试一 import 就会真的开始监听端口。把「建 app」和「listen」拆开：</p>
+
+<div class="cmp">
+<div><h4>src/app.ts（只建 app，不 listen）</h4>
+<pre><code>import express from 'express';
+import { linksRouter } from './links/link.router.js';
+import { errorHandler } from './middleware/error.js';
+
+export function createApp() {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/links', linksRouter);
+  app.use(errorHandler); // 4 参数错误处理中间件
+  return app;
+}</code></pre></div>
+<div><h4>src/server.ts（生产入口才 listen）</h4>
+<pre><code>import { createApp } from './app.js';
+
+const app = createApp();
+app.listen(3000, () =&gt; {
+  console.log('LinkPulse on :3000');
+});</code></pre></div>
+</div>
+
+<p>现在给 <code>POST /api/links</code> 写集成测试，覆盖<b>校验失败 400</b> 与<b>成功 201</b>两条关键路径：</p>
+
+<pre><code>// src/links/link.router.test.ts
+import { describe, it, expect } from 'vitest';
+import request from 'supertest';
+import { createApp } from '../app.js';
+
+const app = createApp();
+
+describe('POST /api/links', () =&gt; {
+  it('缺少 targetUrl → 400，且带错误信息', async () =&gt; {
+    const res = await request(app)
+      .post('/api/links')
+      .send({})                       // 故意不传 body
+      .set('Content-Type', 'application/json');
+
+    expect(res.status).toBe(400);     // zod 校验失败应返回 400
+    expect(res.body).toHaveProperty('error');
+  });
+
+  it('合法请求 → 201，返回短码', async () =&gt; {
+    const res = await request(app)
+      .post('/api/links')
+      .send({ targetUrl: 'https://example.com' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.shortCode).toHaveLength(6);
+    // 验「行为」：拿到的短码确实能再查到
+    const got = await request(app).get(`/api/links/${res.body.shortCode}`);
+    expect(got.status).toBe(200);
+  });
+});</code></pre>
+
+<p><code>request(app)</code> 链式发请求，<code>.send()</code> 带 body，<code>res.status</code> / <code>res.body</code> 拿响应做断言。它会真正经过你的 JSON 解析、zod 校验、controller、service、错误处理——<b>这正是单元测试故意跳过的「胶水层」</b>。</p>
+
+<h2><span class="n">6</span>隔离测试数据：别让测试互相污染</h2>
+
+<p>上面集成测试有个问题：<code>service</code> 真去写库了吗？集成测试通常<b>需要真实数据库</b>（这正是它价值所在），但绝不能用开发库或生产库——会留下脏数据、用例之间互相影响。三种主流隔离方案<sup><a href="#c5">5</a></sup>：</p>
+
+<table style="width:100%;border-collapse:collapse;font-size:.86rem;margin:.8rem 0">
+<tr style="background:#f0f3f0"><th style="text-align:left;padding:.5rem;border:1px solid #ddd">方案</th><th style="text-align:left;padding:.5rem;border:1px solid #ddd">怎么做</th><th style="text-align:left;padding:.5rem;border:1px solid #ddd">权衡</th></tr>
+<tr><td style="padding:.5rem;border:1px solid #ddd">独立测试库</td><td style="padding:.5rem;border:1px solid #ddd">单独一个 <code>linkpulse_test</code> 库，每次跑前 <code>prisma migrate reset</code></td><td style="padding:.5rem;border:1px solid #ddd">简单；但要手动准备环境</td></tr>
+<tr><td style="padding:.5rem;border:1px solid #ddd">事务回滚</td><td style="padding:.5rem;border:1px solid #ddd">每条用例包在一个事务里，结束 ROLLBACK</td><td style="padding:.5rem;border:1px solid #ddd">极快、天然隔离；但跨连接/嵌套事务较难配</td></tr>
+<tr><td style="padding:.5rem;border:1px solid #ddd">Testcontainers</td><td style="padding:.5rem;border:1px solid #ddd">用代码在测试启动时拉一个临时 Postgres 容器，结束销毁</td><td style="padding:.5rem;border:1px solid #ddd">环境最干净、最接近生产；但需要 Docker（0024 后顺理成章）</td></tr>
+</table>
+
+<p>对当前阶段，最朴素可行的是<b>独立测试库 + 每个测试文件前清表</b>。用一个单独的 <code>.env.test</code> 指向测试库，通过 <code>DATABASE_URL</code> 切换：</p>
+
+<pre><code>// vitest.config.ts 里指定测试环境变量文件
+import { defineConfig } from 'vitest/config';
+export default defineConfig({
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
+    setupFiles: ['./test/setup.ts'], // 每个测试文件运行前先执行
+  },
+});</code></pre>
+
+<pre><code>// test/setup.ts —— 测试专用钩子
+import { beforeEach } from 'vitest';
+import { prisma } from '../src/prisma.js';
+
+beforeEach(async () =&gt; {
+  // 关键：清空相关表，保证用例之间互不影响（注意外键顺序）
+  await prisma.click.deleteMany();
+  await prisma.link.deleteMany();
+});</code></pre>
+
+<div class="note"><b>跑测试用独立 DB：</b><code>"test": "dotenv -e .env.test -- vitest run"</code>，或用 Node 20+ 的 <code>node --env-file=.env.test</code>。务必确认 <code>.env.test</code> 的 <code>DATABASE_URL</code> 指向 <b>测试库</b>，否则你会把开发数据 <code>deleteMany</code> 掉。</div>
+
+<div class="rw">🌍 <b>实战：集成测试覆盖关键路径，别贪多。</b>对 LinkPulse，「创建短链」和「短码跳转 302」是命脉——这两条挂了产品就废了，必须有集成测试守住。而「列出用户所有链接」这类查询逻辑简单，单元测就够。把有限的集成测试预算花在<b>钱和用户最敏感的路径</b>上。</div>
+
+<h2><span class="n">7</span>覆盖率与「测行为不测实现」</h2>
+
+<p><b>覆盖率（coverage）</b>是「测试运行时执行了多少比例的代码」。<code>npm run test:cov</code> 会生成报告，告诉你哪些行没被任何测试碰过。它有用，但有两个陷阱：</p>
+
+<ul>
+<li><b>高覆盖率 ≠ 测得好。</b>你可以「执行」一行代码却<b>不断言</b>它的结果——覆盖率 100% 也抓不到 bug。覆盖率只说「跑到了」，不说「验对了」。</li>
+<li><b>盲目追 100% 不划算。</b>从 80% 提到 100% 的成本常常远高于收益，还会逼你给一堆 getter、配置代码写无意义的测试。Fowler 等人长期主张：<b>覆盖率是发现「没测到的关键路径」的工具，不是 KPI</b>。</li>
+</ul>
+
+<p><b>测行为，不测实现（test behavior, not implementation）</b>是最重要的心法。看这两种写法的区别：</p>
+
+<div class="cmp">
+<div><h4>❌ 测实现（脆）</h4>
+<pre><code>// 断言「内部调用了 nanoid」
+it('调用了 nanoid', () =&gt; {
+  const spy = vi.spyOn(idMod, 'nanoid');
+  service.createLink('https://a.com', 'u1');
+  expect(spy).toHaveBeenCalled();
+});
+// 一旦你换掉短码生成库，
+// 行为没变，测试却红了 —— 假警报</code></pre></div>
+<div><h4>✅ 测行为（稳）</h4>
+<pre><code>// 只断言「对外可观察的结果」
+it('返回 6 位、URL 安全的短码', async () =&gt; {
+  const link =
+    await service.createLink('https://a.com', 'u1');
+  expect(link.shortCode).toMatch(/^[\w-]{6}$/);
+});
+// 换库、改实现，只要结果对，
+// 测试照样绿 —— 这才是安全网</code></pre></div>
+</div>
+
+<p>判断标准：<b>问自己「如果重构实现但功能不变，这个测试会不会无辜变红？」</b>会的话，就是测得太细、绑死了实现。好测试盯着「输入 → 可观察的输出/副作用」，对内部怎么实现保持沉默。</p>
+
+<div class="rw">🌍 <b>实战：CI 里自动跑测试。</b>测试的真正威力是<b>自动化</b>：0025 会配 GitHub Actions，让每次 push / 开 PR 都自动 <code>npm test</code>，红了就拦住合并。本章只要保证 <code>npm test</code> 在干净环境（fresh clone + <code>npm ci</code>）下能一条命令跑通——这是上 CI 的前提。所以别在测试里依赖「你本机才有的东西」（比如本地某个手动建的数据、写死的绝对路径）。</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">测试金字塔 & mock</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">给 LinkPulse 的 <code>LinkService.createLink</code> 写测试，希望「快、稳、不连数据库」。下面哪种做法最符合本章思路？</p>
+  <button class="opt" data-correct="true" data-ex="正确。利用 0019 的 DI 注入一个用 vi.fn() 造的假 repo，service 逻辑被完整测到，却零数据库零网络，毫秒级完成——这是金字塔底座的单元测试该有的样子。">通过构造函数注入一个 <code>vi.fn()</code> 造的假 repo，断言 service 的返回与对 repo 的调用</button>
+  <button class="opt" data-correct="false" data-ex="错。连真实测试库属于集成测试，慢且需要环境准备；测纯逻辑没必要连库，这浪费了 DI 带来的可测性。">连一个真实测试库，调用后再去库里查数据验证</button>
+  <button class="opt" data-correct="false" data-ex="错。起完整 HTTP 服务用 supertest 是集成测试，不该用来测单个 service 的纯逻辑；金字塔要求这类逻辑放在大量单元测试里。">用 supertest 起完整 HTTP 服务，通过接口间接验证 service</button>
+  <button class="opt" data-correct="false" data-ex="错。断言内部调用了 nanoid 是『测实现』，换个短码库就会无辜变红；应当只断言可观察的行为（短码格式、是否落库）。">用 spy 断言内部确实调用了 <code>nanoid</code> 函数</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task"><h3>⌨️ 动手：给 LinkPulse 配测试并写单元 + 集成测试</h3>
+<ol>
+<li><code>npm i -D vitest supertest @types/supertest</code>。</li>
+<li>新建 <code>vitest.config.ts</code>（<code>environment: 'node'</code>、<code>include: ['src/**/*.test.ts']</code>），在 <code>package.json</code> 加 <code>"test": "vitest run"</code> 与 <code>"test:cov": "vitest run --coverage"</code>。</li>
+<li>如果还没拆，把 <code>app.ts</code>（导出 <code>createApp()</code>）和 <code>server.ts</code>（<code>app.listen</code>）分开。</li>
+<li><b>单元测试</b>：给 <code>LinkService.createLink</code> 写 <code>link.service.test.ts</code>，用 <code>vi.fn()</code> 注入假 repo，覆盖「非法 URL 抛错且不写库」「合法 URL 生成 6 位短码并落库」。</li>
+<li><b>集成测试</b>：给 <code>POST /api/links</code> 写 <code>link.router.test.ts</code>，用 supertest 覆盖「空 body → 400」「合法 body → 201 且返回短码」。</li>
+<li>跑 <code>npm test</code> 看全绿；再跑 <code>npm run test:cov</code>，看看 <code>LinkService</code> 的覆盖率，找出还没测到的分支（比如撞码重试那条）。</li>
+<li>（加分）建 <code>.env.test</code> 指向独立测试库，加 <code>test/setup.ts</code> 在 <code>beforeEach</code> 里清表，让集成测试真连测试库。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://vitest.dev/guide/" target="_blank" rel="noopener">Vitest 官方 Getting Started 指南</a>。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b><code>npm test</code> 的输出截图（单元 + 集成全绿），以及 <code>npm run test:cov</code> 里 <code>LinkService</code> 那行的覆盖率数字。<br><strong>下一课预告：</strong>Lesson 0024 把 LinkPulse 装进 Docker——写 <code>Dockerfile</code> 和 <code>docker compose</code>，一键拉起 app + Postgres + Redis，为 CI 和真实部署铺路（也让 testcontainers / E2E 成为可能）。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://vitest.dev/guide/" target="_blank" rel="noopener">Vitest — Getting Started</a>（安装、<code>vitest run</code> vs watch、describe/it/expect 基础）</li>
+    <li id="c2"><a href="https://vitest.dev/config/" target="_blank" rel="noopener">Vitest — Configuring Vitest</a>（<code>vitest.config.ts</code> 优先级、<code>test</code> 配置项、include/setupFiles/coverage）</li>
+    <li id="c3"><a href="https://martinfowler.com/articles/practical-test-pyramid.html" target="_blank" rel="noopener">Martin Fowler — The Practical Test Pyramid</a>（测试金字塔分层与「低层测试应远多于高层」原则）</li>
+    <li id="c4"><a href="https://vitest.dev/guide/mocking" target="_blank" rel="noopener">Vitest — Mocking</a>（<code>vi.fn()</code> / <code>vi.mock()</code> / <code>vi.spyOn()</code>，以及每次清理 mock 状态的提醒）</li>
+    <li id="c5"><a href="https://www.npmjs.com/package/supertest" target="_blank" rel="noopener">supertest（npm）</a>（把 Express app 传给 request()、临时端口、对响应做断言）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0023 · 上一课 <a href="0022-performance-and-load-testing.html">性能与压力测试</a> · 下一课（预告）：<em>把 LinkPulse 装进 Docker</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>

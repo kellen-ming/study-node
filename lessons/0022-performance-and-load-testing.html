@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0022 · 性能优化与压测：先测量，再优化</title>
+<link rel="stylesheet" href="lesson.css">
+<style>
+/* 本章专属：压测结果对照表 / 延迟分布条 */
+.bench { width:100%; border-collapse:collapse; margin:.8rem 0; font-size:.86rem; }
+.bench th, .bench td { border:1px solid var(--border,#d0d7de); padding:.4rem .6rem; text-align:right; }
+.bench th:first-child, .bench td:first-child { text-align:left; }
+.bench thead th { background:rgba(127,127,127,.12); }
+.bench .good { color:#1a7f37; font-weight:600; }
+.bench .bad { color:#b42318; font-weight:600; }
+.lat-row { display:flex; align-items:center; gap:.5rem; margin:.25rem 0; font-size:.82rem; }
+.lat-row .lab { width:60px; color:#666; }
+.lat-bar { height:14px; border-radius:3px; background:linear-gradient(90deg,#3aa675,#e6a23c,#b42318); }
+.lat-row .val { font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+<nav class="topnav"><a href="index.html">← 课程目录</a><span>Lesson 0022 / 阶段 5</span></nav>
+<div class="kicker">Lesson 0022 · Node.js 后端之路</div>
+<h1>性能优化与压测：先测量，再优化</h1>
+
+<div class="mission">
+<b>为什么学这个？</b> LinkPulse 已经能「创建短链 → 存库 → <code>GET /:code</code> 做 302 跳转 → Redis 缓存」。但要「上线收费」，你必须能回答一个收费用户一定会问的问题：<em>「我每秒能扛多少跳转？慢的时候有多慢？」</em> 本章教你<b>不靠感觉、靠数据</b>地回答它：用 <code>autocannon</code> 压测拿到 QPS 与 p50/p99 延迟，定位真正的瓶颈（N+1、缺索引、连接池、阻塞事件循环），再针对性优化——并用「加 Redis 前 vs 后」的压测对比，亲眼看见数量级的吞吐提升。
+</div>
+
+<h2><span class="n">1</span>先测量，再优化：别凭感觉动手</h2>
+
+<p>你大概率听过这句话：<b>「过早优化是万恶之源」（premature optimization is the root of all evil）</b>。它的真正含义不是「不要优化」，而是<b>「不要在没有数据的情况下优化」</b>。后端性能优化的第一原则只有一句：</p>
+
+<div class="note"><b>原则：先测量（measure），后优化（optimize）。</b> 没有测量数据就改代码，等于闭着眼睛拧螺丝——你会把时间花在「看起来很慢但其实没人调用」的代码上，而真正的瓶颈纹丝不动。</div>
+
+<p>这里有两个互补的工具概念，前端的你可能对前者很熟：</p>
+<ul>
+<li><b>压测（load testing / benchmarking）</b>：从外部，用大量并发请求轰炸一个接口，测出它的<b>吞吐量</b>和<b>延迟分布</b>。回答「这个接口在压力下表现如何」。</li>
+<li><b>剖析（profiling）</b>：从内部，记录代码每个函数耗时多少、事件循环是否被阻塞、哪行 SQL 最慢。回答「时间到底花在哪了」。</li>
+</ul>
+
+<p>典型工作流是个闭环：<b>压测发现「慢」 → 剖析定位「为什么慢」 → 改一处 → 再压测确认「真的快了」</b>。每次只改一个变量，否则你分不清是哪个改动起了作用。本章聚焦压测这一头，剖析会在排查时顺带用到。</p>
+
+<div class="rw">🌍 <b>实战：先 profile/压测定位真瓶颈，再动手。</b> 真实项目里最常见的浪费是：工程师凭直觉认定「ORM 慢」，花两天把 Prisma 换成手写 SQL，结果 p99 没动——因为真正的瓶颈是一个没加索引的 <code>WHERE short_code = ?</code>，加一行索引就解决了。先量，能帮你省下 90% 的无效努力。</div>
+
+<h3>读懂延迟分布：为什么看 p99，不看平均</h3>
+
+<p>压测会给你一组<b>百分位延迟（latency percentiles）</b>：p50、p95、p99……<code>p99 = 23ms</code> 的意思是「99% 的请求在 23ms 内返回，只有最慢的 1% 超过它」。<b>平均值（average）会骗人</b>，因为它被大量快请求拉低，掩盖了那条长尾。</p>
+
+<div class="lat-row"><span class="lab">p50</span><span class="lat-bar" style="width:40px"></span><span class="val">5 ms</span></div>
+<div class="lat-row"><span class="lab">p90</span><span class="lat-bar" style="width:90px"></span><span class="val">12 ms</span></div>
+<div class="lat-row"><span class="lab">p99</span><span class="lat-bar" style="width:240px"></span><span class="val">180 ms</span></div>
+
+<p>上图这种「平均 7ms 但 p99 高达 180ms」的接口，意味着<b>每 100 个用户就有 1 个等了快 0.2 秒</b>。在收费 SaaS 里，这 1% 往往是付费大客户的批量请求。<b>SLA（服务等级协议）几乎都按 p99/p99.9 来签，从不按平均签。</b></p>
+
+<div class="rw">🌍 <b>实战：关注 p99，而非平均。</b> 一个流传很广的判断：「平均延迟告诉你系统平时好不好用；尾部延迟（p99/p99.9）告诉你系统最坏时有多糟，而最坏的体验才是用户记住并退订的那个。」LinkPulse 的跳转接口被嵌在别人网站里，一次 p99 卡顿就可能让对方页面整体变慢——你必须盯 p99。</p></div>
+
+<h2><span class="n">2</span>用 autocannon 压测 LinkPulse 的跳转接口</h2>
+
+<p><code>autocannon</code> 是一个用 Node.js 写的 HTTP/1.1 压测工具，由 Fastify 核心作者维护，CLI 和编程式 API 都有，能打出很高的并发并给出 p50/p99 延迟与 Req/Sec 吞吐<sup><a href="#c1">1</a></sup>。它和我们的技术栈天然契合——直接 <code>npm i -D</code> 装到开发依赖即可。</p>
+
+<pre><code>npm i -D autocannon
+# 它附带类型，无需单独装 @types</code></pre>
+
+<h3>2.1 CLI 三个核心参数</h3>
+
+<p>最常用的三个 flag<sup><a href="#c1">1</a></sup>：</p>
+<ul>
+<li><code>-c / --connections</code>：并发连接数（默认 10）。模拟「同时有多少个客户端」。</li>
+<li><code>-d / --duration</code>：压测持续秒数（默认 10）。</li>
+<li><code>-p / --pipelining</code>：每个连接上的流水线请求数（默认 1）。先用默认 1 即可。</li>
+</ul>
+
+<p>假设 LinkPulse 跑在 <code>http://localhost:3000</code>，库里已有短码 <code>abc123</code>。压测跳转接口：</p>
+
+<pre><code># 100 并发，压 20 秒，打 GET /abc123
+npx autocannon -c 100 -d 20 http://localhost:3000/abc123</code></pre>
+
+<div class="note"><b>坑：302 会被「跟随」吗？</b> 跳转接口返回 <code>302</code>。autocannon <b>默认不跟随重定向</b>，它把 302 当成一次正常完成的请求来计数——这正是我们想要的（我们测的是 LinkPulse 自己的耗时，不是目标网站的）。但要注意：3xx 不是 2xx，autocannon 会把它统计进 <code>non2xx</code> 计数，这是<b>正常现象</b>，不是错误。真正的错误看 <code>errors</code> / <code>timeouts</code> 字段。</div>
+
+<h3>2.2 读懂输出表</h3>
+
+<p>autocannon 跑完打印两张表<sup><a href="#c1">1</a></sup>：<b>Latency</b>（延迟，含 2.5%/50%/97.5%/99% 等百分位、平均、标准差、最大值，单位 ms）和 <b>Req/Sec + Bytes/Sec</b>（吞吐，每秒采样一次）。重点盯三处：</p>
+<ul>
+<li><b>Req/Sec 的 Avg</b>：平均每秒处理多少请求 ≈ 你的 QPS。</li>
+<li><b>Latency 的 p99</b>：尾部延迟。</li>
+<li><b>非预期的 errors / timeouts / non2xx</b>：有大量超时说明系统被压垮了。</li>
+</ul>
+
+<h3>2.3 编程式 API：把压测脚本化（TypeScript / ESM）</h3>
+
+<p>CLI 适合临时一压；要做「优化前后对比」并把数字记下来，写成脚本更靠谱。autocannon 的编程式 API 返回一个结果对象，含 <code>requests</code> / <code>latency</code> / <code>throughput</code> 三个直方图（histogram）字段，每个都带 <code>average</code>、<code>p99</code> 等属性<sup><a href="#c1">1</a></sup>。</p>
+
+<pre><code>// scripts/bench-redirect.ts —— 压测 LinkPulse 跳转接口
+import autocannon from 'autocannon';
+
+async function bench(label: string, url: string) {
+  // autocannon 返回 Promise（不传 callback 时）
+  const result = await autocannon({
+    url,
+    connections: 100,   // -c
+    duration: 20,       // -d
+    pipelining: 1,      // -p
+  });
+
+  console.log(`\n=== ${label} ===`);
+  console.log(`Req/Sec (avg): ${result.requests.average.toFixed(0)}`);
+  console.log(`Latency p50 : ${result.latency.p50} ms`);
+  console.log(`Latency p99 : ${result.latency.p99} ms`);
+  console.log(`Errors/Timeouts: ${result.errors} / ${result.timeouts}`);
+  return result;
+}
+
+const code = process.argv[2] ?? 'abc123';
+await bench('GET /:code 跳转', `http://localhost:3000/${code}`);
+</code></pre>
+
+<pre><code># package.json 里加一条脚本（ESM + tsx 直接跑 TS）
+# "bench:redirect": "tsx scripts/bench-redirect.ts"
+npm run bench:redirect -- abc123</code></pre>
+
+<div class="note"><b>压测纪律：</b> ① 用<b>生产构建</b>（<code>NODE_ENV=production</code>），别用带 source-map / 热重载的 dev server，否则数字毫无意义。② 压测机和被压服务<b>分开</b>更准（同机会互抢 CPU），本地学习同机也行，但别和数字较真到个位数。③ 每次只改<b>一个</b>变量。</div>
+
+<h2><span class="n">3</span>缓存的威力：跳转接口「直查库」vs「Redis 缓存」压测对比</h2>
+
+<p>你在 Lesson 0017 已经为跳转接口加了 <b>cache-aside</b>（旁路缓存）：先查 Redis，命中（hit）就直接用；未命中（miss）才查 Postgres 再回填 Redis。本节用压测<b>量化</b>这层缓存到底值多少钱。</p>
+
+<p>先快速复习两个指标的定义：</p>
+<ul>
+<li><b>缓存命中率（hit rate）</b> = 命中次数 ÷ 总请求数。短链跳转是「读多写极少 + 热点集中」的典型场景，命中率通常能到 95%+。</li>
+<li><b>为什么缓存快</b>：Redis 是内存键值存储，一次 <code>GET</code> 通常是亚毫秒级；而 Postgres 即使走索引，也要经过连接、查询计划、磁盘/页缓存、网络往返，单次往往是毫秒级。差一个数量级。</li>
+</ul>
+
+<p>为做对比，临时给跳转接口加一个「绕过缓存」的开关（仅压测用）：</p>
+
+<pre><code>// src/links/redirect.controller.ts （节选，对比用）
+import type { Request, Response } from 'express';
+import { redis } from '../redis.js';
+import { prisma } from '../prisma.js';
+
+export async function redirect(req: Request, res: Response) {
+  const { code } = req.params;
+  const bypass = req.query.nocache === '1'; // 压测开关：?nocache=1 强制查库
+
+  if (!bypass) {
+    const cached = await redis.get(`link:${code}`);
+    if (cached) return res.redirect(302, cached); // 缓存命中
+  }
+
+  const link = await prisma.link.findUnique({
+    where: { shortCode: code },
+    select: { targetUrl: true }, // 只取需要的列，见第 5 节
+  });
+  if (!link) return res.status(404).send('Not found');
+
+  if (!bypass) await redis.set(`link:${code}`, link.targetUrl, 'EX', 3600);
+  return res.redirect(302, link.targetUrl);
+}
+</code></pre>
+
+<pre><code># 两轮对比压测
+npx autocannon -c 100 -d 20 http://localhost:3000/abc123              # 走缓存
+npx autocannon -c 100 -d 20 "http://localhost:3000/abc123?nocache=1" # 直查库</code></pre>
+
+<p>你会看到类似这样的差距（具体数字随机器变化，但<b>数量级差异是真实且可复现的</b>）：</p>
+
+<table class="bench">
+<thead><tr><th>方案</th><th>Req/Sec (avg)</th><th>p50 延迟</th><th>p99 延迟</th></tr></thead>
+<tbody>
+<tr><td>直查 Postgres（?nocache=1）</td><td class="bad">~3,000</td><td>28 ms</td><td class="bad">120 ms</td></tr>
+<tr><td>Redis 缓存命中</td><td class="good">~18,000</td><td>4 ms</td><td class="good">15 ms</td></tr>
+</tbody>
+</table>
+
+<div class="rw">🌍 <b>实战：跳转接口加 Redis 前后压测对比能看到巨大差距。</b> 这正是短链产品的核心竞争力——跳转必须快且稳。缓存把吞吐拉高数倍、把 p99 压低一个数量级。但别忘了缓存的代价：<b>数据一致性</b>。当用户改了 <code>targetUrl</code>，你必须主动 <code>redis.del(\`link:\${code}\`)</code> 让旧值失效（write 时删 key），否则跳转会指向旧地址。压测看的是性能，但上线前一致性必须想清楚。</div>
+
+<h2><span class="n">4</span>头号 ORM 坑：N+1 查询问题</h2>
+
+<p>现在做一个 LinkPulse 的新功能：<b>「我的链接」列表页</b>——展示当前用户的所有短链，每条还要显示「创建者邮箱」（来自 <code>users</code> 表）。一个前端转后端最容易写出的「天真版本」是这样：</p>
+
+<pre><code>// ❌ 天真写法：制造一个 N+1
+const links = await prisma.link.findMany({
+  where: { userId },
+}); // ① 一条查询：拿到 N 条 link
+
+const rows = [];
+for (const link of links) {
+  const user = await prisma.user.findUnique({   // ② 循环里每条再查一次 user！
+    where: { id: link.userId },
+    select: { email: true },
+  });
+  rows.push({ ...link, ownerEmail: user?.email });
+}
+</code></pre>
+
+<p>这段代码<b>看起来人畜无害，运行也完全正确</b>——这正是它危险的地方。<b>N+1 查询问题（N+1 problem）</b>的定义：先执行 1 条查询拿到 N 条记录，然后<b>对每条记录再各发 1 条查询</b>去取关联数据，总共发出 <code>1 + N</code> 条 SQL<sup><a href="#c2">2</a></sup>。</p>
+
+<div class="note"><b>类比：</b> 你去图书馆借 100 本书，不是推一辆车一次搬走，而是<b>跑 100 趟、每趟搬一本</b>。每趟（每条 SQL）的固定开销——网络往返、查询解析、连接占用——单看很小，乘以 100 就成了灾难。列表只有 10 条时你根本察觉不到；某个大客户有 5000 条链接时，这个接口直接超时。</div>
+
+<div class="rw">🌍 <b>实战：N+1 是 ORM 的头号坑——「查了一个列表，又对列表里每一条去查它的关联」。</b> 它在开发期几乎不可见（本地数据少、延迟低），一上生产就爆。排查信号有三个：① 接口延迟随列表行数<b>线性增长</b>；② 数据库 QPS 异常高但每条都简单；③ 打开 Prisma 的查询日志，看到刷屏的重复 <code>SELECT ... FROM users WHERE id = $1</code>。</div>
+
+<h3>4.1 用 Prisma 的 include / select 一次取回关联</h3>
+
+<p>解法是把「循环里的 N 次查询」合并成「跟主查询一起完成」。Prisma 官方推荐用 <code>include</code> 或 <code>select</code> 做<b>预加载（eager loading）</b>，让关联数据随主查询一并取回<sup><a href="#c2">2</a></sup>：</p>
+
+<div class="cmp">
+<div><h4>✅ include：在结果上挂载完整关联对象</h4>
+<pre><code>const links = await prisma.link.findMany({
+  where: { userId },
+  include: { user: { select: { email: true } } },
+});
+// links[0].user.email 可直接用
+</code></pre></div>
+<div><h4>✅ select：精确挑选要的字段（更省）</h4>
+<pre><code>const links = await prisma.link.findMany({
+  where: { userId },
+  select: {
+    id: true, shortCode: true, targetUrl: true,
+    user: { select: { email: true } }, // 嵌套关联
+  },
+});
+</code></pre></div>
+</div>
+
+<p>这样从 <code>1 + N</code> 条 SQL 降到<b>常数条</b>。默认情况下，Prisma（v5+）对带 <code>include</code>/<code>select</code> 的关联查询使用数据库层 JOIN 策略（<code>relationLoadStrategy: "join"</code>）：在 PostgreSQL 上用 LATERAL JOIN + JSON 聚合，把关联拼接放在数据库里一次完成<sup><a href="#c3">3</a></sup>。你也可以显式选择 <code>relationLoadStrategy: "query"</code>（应用层多查询再合并），但官方建议<b>默认用 join，遇到特殊数据分布再用 profile 验证哪个更快</b><sup><a href="#c3">3</a></sup>。</p>
+
+<div class="note"><b>include vs select 怎么选？</b> 想<b>在已有字段基础上额外加关联</b> → 用 <code>include</code>；想<b>精确控制返回哪些列（少传数据、少占带宽）</b> → 用 <code>select</code>。注意两者<b>不能在同一层级混用</b>。SaaS 接口建议优先 <code>select</code>，只取前端真正要用的列。</div>
+
+<h2><span class="n">5</span>更深一层：索引、连接池、不阻塞事件循环</h2>
+
+<p>修掉 N+1 后，如果某条接口还慢，瓶颈通常在这三处之一。</p>
+
+<h3>5.1 索引：用 EXPLAIN 看查询计划（复习 0013）</h3>
+
+<p>跳转接口的核心是 <code>WHERE short_code = $1</code>。<code>short_code</code> 在建表时已加 <code>unique</code>，Postgres 会自动为唯一约束建索引——但当你新增其它高频过滤列（比如按 <code>user_id</code> 查列表）时，必须确认它走了索引。用 <code>EXPLAIN ANALYZE</code> 看真实执行计划<sup><a href="#c4">4</a></sup>：</p>
+
+<pre><code>-- 在 psql 里直接跑
+EXPLAIN ANALYZE SELECT * FROM links WHERE user_id = 42;</code></pre>
+
+<p>读计划只看一处关键词<sup><a href="#c4">4</a></sup>：</p>
+<ul>
+<li><b>Seq Scan（顺序扫描）</b>：逐行扫全表。大表上出现它通常意味着<b>缺索引</b>——表越大越慢。</li>
+<li><b>Index Scan（索引扫描）</b>：先查 B-tree 定位，再回表取数据。从大表里取一小部分行时，比 Seq Scan 快得多。</li>
+</ul>
+
+<p>给高频过滤列加索引（Prisma schema 里声明，再 migrate）：</p>
+
+<pre><code>// prisma/schema.prisma
+model Link {
+  id        Int      @id @default(autoincrement())
+  shortCode String   @unique          // 自动有索引
+  targetUrl String
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([userId])                    // ← 为「按用户查列表」加索引
+}
+</code></pre>
+
+<div class="note"><b>别盲目加索引。</b> 索引加速读，但拖慢写（每次 INSERT/UPDATE 都要维护索引）并占空间。小表上 Postgres 的规划器会<b>故意</b>选 Seq Scan，因为全表扫比走索引还快——这是对的，不是 bug<sup><a href="#c4">4</a></sup>。所以：先 EXPLAIN 确认真有 Seq Scan 拖慢了大表，再加索引。又是「先测量」。</div>
+
+<h3>5.2 连接池（connection pool）</h3>
+
+<p><b>连接池</b>是一组预先建好、可复用的数据库连接。为什么需要它？建立一条新的 Postgres 连接很贵（TCP 握手 + 认证 + 后端进程创建），如果每个请求都新建一条，高并发下会瞬间打满数据库的 <code>max_connections</code> 而报错。池子的作用是「借了用完还、循环复用」。</p>
+
+<p>好消息：<b>Prisma Client 内置连接池，你已经在用了</b>。默认池大小公式是 <code>physical_cpus × 2 + 1</code>（4 核机 = 9 条连接）<sup><a href="#c5">5</a></sup>。可以在连接串里用 <code>connection_limit</code> 显式覆盖：</p>
+
+<pre><code># .env —— 例如把池设为 20 条
+DATABASE_URL="postgresql://user:pass@localhost:5432/linkpulse?connection_limit=20"</code></pre>
+
+<div class="rw">🌍 <b>实战：连接池太小或太大都坑。</b> 太小 → 高并发时请求排队等连接，你会看到 Prisma 报 <code>connection pool timeout</code>，p99 飙升但 CPU 却很闲（在等）。太大 → 多个应用实例 × 各自的池，加起来超过数据库 <code>max_connections</code>，直接 <code>too many connections</code> 崩库。多实例部署时，官方建议每实例的 <code>connection_limit ≈ 默认池大小 ÷ 实例数</code><sup><a href="#c5">5</a></sup>。压测时若发现 QPS 上不去且 DB CPU 没满，先怀疑连接池。</div>
+
+<h3>5.3 别阻塞事件循环（呼应 0020）</h3>
+
+<p>复习 0020 的核心：Node.js 用<b>单线程事件循环（event loop）</b>处理所有 JS 回调与非阻塞 I/O。官方《Don't Block the Event Loop》指出：如果某个回调长时间占用 CPU 不返回，这条线程就被<b>阻塞</b>，期间<b>所有其它请求都得排队等</b>——轻则吞吐暴跌，重则整个服务拒绝响应<sup><a href="#c6">6</a></sup>。</p>
+
+<p>注意区分：跳转接口里的 <code>await redis.get(...)</code>、<code>await prisma...</code> 都是 I/O，<b>不会</b>阻塞事件循环（等待期间线程去干别的）。真正危险的是<b>同步 CPU 密集计算</b>。LinkPulse 未来会有这种场景：导出某条链接的全部点击记录为大 CSV、或对 user-agent 跑复杂正则解析。如果直接在请求里同步算：</p>
+
+<pre><code>// ❌ 在请求处理里做 CPU 密集计算，阻塞所有人
+app.get('/links/:id/export', async (req, res) =&gt; {
+  const clicks = await prisma.click.findMany({ where: { linkId } });
+  const csv = heavySyncFormat(clicks); // 假设这步 CPU 密集、跑 800ms
+  res.type('text/csv').send(csv);       // 这 800ms 里，全站其它请求全卡住
+});</code></pre>
+
+<p>官方给出两类解法<sup><a href="#c6">6</a></sup>：<b>分片（partitioning）</b>——把大循环拆成小块、用 <code>setImmediate</code> 在块之间让出事件循环，适合简单遍历；<b>卸载（offloading）</b>——把整块重计算交给 <b>worker_threads</b> 工作线程跑，主线程只收结果，适合复杂逻辑。LinkPulse 的 CSV 导出属于后者：</p>
+
+<pre><code>// ✅ 卸载到 worker（呼应 0020 的 worker_threads）
+import { Worker } from 'node:worker_threads';
+
+app.get('/links/:id/export', async (req, res) =&gt; {
+  const clicks = await prisma.click.findMany({ where: { linkId } });
+  const csv = await runInWorker('./workers/csv.js', clicks); // 重活在别的线程
+  res.type('text/csv').send(csv); // 主线程全程不被阻塞，跳转接口照常飞快
+});
+
+function runInWorker&lt;T&gt;(file: string, data: unknown): Promise&lt;T&gt; {
+  return new Promise((resolve, reject) =&gt; {
+    const w = new Worker(new URL(file, import.meta.url), { workerData: data });
+    w.once('message', resolve);
+    w.once('error', reject);
+  });
+}</code></pre>
+
+<div class="rw">🌍 <b>实战：怎么发现事件循环被阻塞？</b> 压测时如果<b>所有</b>接口（包括最简单的健康检查）的 p99 同时无规律飙高，而 CPU 单核打满，几乎可以断定有同步重计算在堵路。生产里可用 <code>perf_hooks</code> 的 <code>monitorEventLoopDelay()</code> 或 pino 配合事件循环延迟指标做监控，超阈值告警。规律是：<b>请求处理路径里不要出现耗时的同步代码</b>。</div>
+
+<div class="quiz" id="quiz">
+  <h3>🧠 小检验 <span class="pill">性能</span></h3>
+  <p style="font-size:.9rem;margin:.2rem 0 .6rem">压测「我的链接」列表接口时，发现接口延迟随返回行数<b>线性增长</b>，且数据库日志里刷屏出现大量相同的 <code>SELECT ... FROM users WHERE id = $1</code>。最可能的原因与修法是？</p>
+  <button class="opt" data-correct="true" data-ex="对：这是典型 N+1——列表查 1 次、再对每条各查 1 次 user。用 Prisma 的 include/select 把关联预加载，一次取回，SQL 从 1+N 降到常数条。">N+1 查询：用 include/select 预加载关联，一次取回</button>
+  <button class="opt" data-correct="false" data-ex="错：连接池耗尽通常表现为 connection pool timeout、且 CPU 很闲在等，不会刷屏出现重复的单行 SELECT，也不会随行数线性增长。">连接池太小，应把 connection_limit 调大到 200</button>
+  <button class="opt" data-correct="false" data-ex="错：事件循环阻塞表现为所有接口（含健康检查）p99 一起飙、单核 CPU 打满，不会在 DB 日志里产生大量重复单行查询。">事件循环被阻塞，应把查询卸载到 worker_threads</button>
+  <button class="opt" data-correct="false" data-ex="错：缓存命中率低会让请求多走数据库，但不会产生「每行一条重复 user 查询、随行数线性增长」这个特征，那是 N+1 的指纹。">Redis 命中率太低，应延长缓存 TTL</button>
+  <div class="feedback" id="fb"></div>
+</div>
+
+<div class="task">
+<h3>⌨️ 动手：压测跳转 + 制造并修复一个 N+1</h3>
+<ol>
+<li><code>npm i -D autocannon tsx</code>，确认 LinkPulse 以生产模式跑在 <code>:3000</code>，库里有一个可用短码（如 <code>abc123</code>）。</li>
+<li>给跳转 controller 加 <code>?nocache=1</code> 绕过开关（见第 3 节），用 <code>npx autocannon -c 100 -d 20</code> 分别压「走缓存」与「直查库」，把两组 <b>Req/Sec、p50、p99</b> 记到一张表里，确认缓存带来数量级差距。</li>
+<li>写出第 4 节的「我的链接」列表接口的<b>天真版本（N+1）</b>，打开 Prisma 查询日志（<code>new PrismaClient({ log: ['query'] })</code>），压测它并数一数发了多少条 SQL。</li>
+<li>用 <code>include</code> 或 <code>select</code> 改成预加载版本，重新压测，对比 SQL 条数与 p99——记录前后差异。</li>
+<li>（加分）给 <code>links</code> 表的 <code>userId</code> 加 <code>@@index</code>，迁移后用 <code>EXPLAIN ANALYZE</code> 看列表查询是否从 Seq Scan 变成 Index Scan。</li>
+</ol>
+</div>
+
+<div class="src">📖 <strong>本课首选精读源</strong>：<a href="https://nodejs.org/learn/asynchronous-work/dont-block-the-event-loop" target="_blank" rel="noopener">Node.js 官方《Don't Block the Event Loop (or the Worker Pool)》</a>。</div>
+
+<div class="ask">👩‍🏫 <b>跑通后发我：</b> 你那张「缓存 vs 直查库」和「N+1 vs include」的前后对比表（Req/Sec、p50、p99），以及修复 N+1 后 SQL 条数从多少降到多少。<br><strong>下一课预告：</strong> 性能靠数据保障，正确性也要靠数据保障——Lesson 0023 进入<b>自动化测试</b>，给 LinkPulse 写单元测试与接口测试，让每次重构都不怕改坏。</div>
+
+<footer>
+  <p><strong>引用来源（Citations）</strong></p>
+  <ol>
+    <li id="c1"><a href="https://github.com/mcollina/autocannon" target="_blank" rel="noopener">autocannon · GitHub（mcollina）</a>（CLI 参数 -c/-d/-p、默认输出的 Latency 与 Req/Sec 表、含 p50/p99 等百分位、编程式 API 与结果对象 requests/latency/throughput 字段）</li>
+    <li id="c2"><a href="https://www.prisma.io/docs/orm/prisma-client/queries/query-optimization-performance" target="_blank" rel="noopener">Query optimization · Prisma Documentation</a>（N+1 问题定义、用 include/select 预加载解决）</li>
+    <li id="c3"><a href="https://www.prisma.io/blog/prisma-orm-now-lets-you-choose-the-best-join-strategy-preview" target="_blank" rel="noopener">Prisma ORM Now Lets You Choose the Best Join Strategy · Prisma Blog</a>（relationLoadStrategy 的 join / query 两种策略，PostgreSQL 默认用 LATERAL JOIN + JSON 聚合，建议 profile 验证）</li>
+    <li id="c4"><a href="https://www.crunchydata.com/blog/postgres-scan-types-in-explain-plans" target="_blank" rel="noopener">Postgres Scan Types in EXPLAIN Plans · Crunchy Data</a>（EXPLAIN ANALYZE、Seq Scan vs Index Scan、规划器何时选顺序扫描）</li>
+    <li id="c5"><a href="https://www.prisma.io/docs/orm/prisma-client/setup-and-configuration/databases-connections/connection-pool" target="_blank" rel="noopener">Connection pool · Prisma Documentation</a>（默认池大小 num_physical_cpus × 2 + 1、connection_limit 配置、多实例分配建议）</li>
+    <li id="c6"><a href="https://nodejs.org/learn/asynchronous-work/dont-block-the-event-loop" target="_blank" rel="noopener">Don't Block the Event Loop (or the Worker Pool) · Node.js</a>（事件循环阻塞的危害、分片 partitioning 与卸载 offloading 到 worker 的两类解法）</li>
+  </ol>
+  <p style="margin-top:1rem">Lesson 0022 · 上一课 <a href="0021-realtime-websocket-dashboard.html">实时 WebSocket 仪表盘</a> · 下一课（预告）：<em>自动化测试</em></p>
+</footer>
+<script src="lesson.js"></script>
+</body>
+</html>
