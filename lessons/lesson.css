@@ -122,5 +122,5 @@ footer li{margin:.35rem 0}
 .cmp h4{margin:.2rem 0 .3rem; font-size:.82rem; color:var(--muted); font-weight:600}
 .cmp pre{margin:0}
 /* 文件树 */
-.tree{font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.8rem; line-height:1.7; background:var(--code-bg); border-radius:6px; padding:.9rem 1.1rem}
+.tree{font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.8rem; line-height:1.7; background:var(--code-bg); border-radius:6px; padding:.9rem 1.1rem; white-space:pre; overflow-x:auto}
 @media(max-width:520px){ .cmp{grid-template-columns:1fr} }
